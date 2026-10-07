@@ -20,5 +20,5 @@
 - [ ] base 브랜치가 `dev`임
 - [ ] PR 올리기 전에 dev 최신 내용을 합침 (`git fetch origin` → `git merge origin/dev`)
 - [ ] 비밀 정보(키 · 토큰 · 인증서 · .env)가 없음
-- [ ] 공용 파일(values.yaml · requirements · migrations · Jenkinsfile 등)을 바꿨으면 #dev-git에 공지함
+- [ ] 공용 파일(values.yaml · requirements · migrations · Jenkinsfile 등)을 바꿨으면 팀 슬랙에 공지함
 - [ ] 제목이 `타입(범위): 요약` 형식임
