@@ -1,0 +1,18 @@
+# 모든 텍스트 파일의 줄바꿈을 LF로 통일
+# 윈도우(CRLF)와 리눅스(LF) 차이로 파일 전체가 바뀐 것처럼 보이는 충돌을 막음
+* text=auto eol=lf
+
+# 윈도우 전용 스크립트만 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 바이너리 파일은 줄바꿈 변환하지 않음
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.pptx binary

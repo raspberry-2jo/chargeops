@@ -1,0 +1,99 @@
+# ==============================================
+# ChargeOps .gitignore
+# 여기 적힌 파일은 git add를 해도 커밋에 들어가지 않음
+# ==============================================
+
+# ----- 비밀 정보 (절대 커밋 금지) -----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+secrets/
+credentials*
+*kubeconfig*
+.kube/
+wg*.conf
+*.wg
+# Sealed Secrets로 암호화하기 전의 평문 Secret
+*-secret.yaml
+!*-sealedsecret.yaml
+
+# ----- AWS / Terraform -----
+.aws/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+.terraform.lock.hcl.bak
+
+# ----- Vagrant / VM -----
+.vagrant/
+*.box
+*.vdi
+*.vmdk
+*.ova
+*.iso
+
+# ----- Ansible -----
+*.retry
+vault-password*
+
+# ----- Python -----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# ----- ESP32 / PlatformIO / Arduino -----
+.pio/
+.pioenvs/
+.piolibdeps/
+*.bin
+*.elf
+
+# ----- Helm -----
+deploy/helm/**/charts/*.tgz
+
+# ----- DB 덤프·백업 -----
+*.dump
+*.sql.gz
+*.backup
+pgbackrest-local/
+
+# ----- 로그 -----
+*.log
+logs/
+
+# ----- 대용량 파일 (Notion·드라이브에 올리고 링크만) -----
+*.mp4
+*.mov
+*.zip
+*.tar
+*.tar.gz
+
+# ----- IDE / OS -----
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

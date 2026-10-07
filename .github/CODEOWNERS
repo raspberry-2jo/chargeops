@@ -1,0 +1,32 @@
+# ==============================================
+# 폴더별 리뷰 담당 팀
+# - PR이 이 경로를 바꾸면 해당 팀이 자동으로 리뷰어가 됨
+# - 규칙상 담당 팀 중 최소 1명의 승인이 필요함
+# - 아래에 있는 줄일수록 우선순위가 높음
+# - 사람 대신 팀으로 적는 이유: 담당자가 1명이면 그 사람이 올린 PR은
+#   담당 승인을 해줄 사람이 없어서 머지가 막힘
+# - <조직명>을 실제 Organization 이름으로 바꿔서 올릴 것
+# ==============================================
+
+# 기본값: 나머지 전부
+*                           @<조직명>/infra-team @<조직명>/data-team
+
+# ----- 인프라 -----
+/apps/csms/                 @<조직명>/infra-team
+/apps/virtual-charger/      @<조직명>/infra-team
+/apps/alert-router/         @<조직명>/infra-team
+/edge/                      @<조직명>/infra-team
+/infra/                     @<조직명>/infra-team
+/deploy/                    @<조직명>/infra-team
+/monitoring/                @<조직명>/infra-team
+/Jenkinsfile                @<조직명>/infra-team
+
+# ----- 데이터 -----
+/apps/collector/            @<조직명>/data-team
+/apps/chatops-bot/          @<조직명>/data-team
+/apps/ai-gateway/           @<조직명>/data-team
+/db/                        @<조직명>/data-team
+
+# ----- 깃 규칙 파일 (양 팀 모두 확인) -----
+/.github/                   @<조직명>/infra-team @<조직명>/data-team
+/README.md                  @<조직명>/infra-team @<조직명>/data-team
