@@ -46,7 +46,7 @@
 
 | 언제 | 할 일 |
 |---|---|
-| 처음 한 번 | 깃 설치 → 이름·이메일 등록 → 깃허브 초대 수락 → 레포 클론 → 내 이름 브랜치 만들기 → 연습 PR |
+| 처음 한 번 | 깃허브 초대 수락 → 깃 설치 → 이름·이메일 등록 → 레포 클론 → **내 이름 브랜치로 이동** → 잘 됐는지 확인 → 연습 PR |
 | 매일 아침 | 내 브랜치에 dev 최신 내용 합치기 |
 | 작업 하나 끝날 때마다 | 커밋 → dev 합치기 → 푸시 → PR → 리뷰 반영 → **내가 머지** → 다시 dev 합치기 |
 | 리뷰 요청 받으면 | 당일 안에 Approve 또는 Request changes |
@@ -55,9 +55,19 @@
 
 ## 1. 처음 시작하기 (최초 1회)
 
-### 1-1. 깃 설치
+**브랜치와 폴더는 Git 담당이 이미 다 만들어 둠.** 팀원은 새로 만들 것 없이 받아서(클론) 내 브랜치로 이동만 하면 됨. 아래 1-1 ~ 1-7을 순서대로 하고, 막히면 화면을 캡처해서 `#dev-git`에 올림.
 
-[git-scm.com](https://git-scm.com)에서 받아 기본값으로 설치함. 같이 깔리는 Git Bash(깃 명령어를 치는 터미널)를 씀.
+### 1-1. 깃허브 초대 수락
+
+Git 담당이 Organization(팀 단위로 레포와 멤버를 관리하는 깃허브 계정) **raspberry-2jo**로 초대를 보냄. 수락해야 푸시 권한이 생김.
+
+- 깃허브에 로그인한 상태로 https://github.com/orgs/raspberry-2jo/invitation 접속 → **Join raspberry-2jo**
+- 또는 메일함(스팸함 포함)의 초대 메일에서 **Join @raspberry-2jo**
+- 2단계 인증 설정 화면이 나오면 그대로 따라서 설정함
+
+### 1-2. 깃 설치
+
+[git-scm.com](https://git-scm.com) → **Download for Windows** → 기본값으로 설치함. 같이 깔리는 **Git Bash**(깃 명령어를 치는 터미널)를 시작 메뉴에서 열고, 이후 명령어는 전부 여기에 입력함.
 
 ```bash
 # ===== 실행할 명령어 =====
@@ -66,42 +76,30 @@ git --version
 
 ```bash
 # ===== 실행 결과 =====
-git version 2.51.0.windows.1
+git version 2.5x.x.windows.1
 ```
 
 버전 숫자가 나오면 성공임.
 
-### 1-2. 이름·이메일·기본 설정 등록
+### 1-3. 이름·이메일·기본 설정 등록
 
 커밋(commit, 변경 내용을 이력에 저장)마다 "누가 저장했는지"가 남음. 우리 레포는 공개라서 이 이메일이 누구에게나 보임. 그래서 진짜 이메일 대신 **깃허브가 주는 noreply 주소**를 씀.
 
 1. 깃허브 → 오른쪽 위 프로필 → **Settings** → **Emails**
-2. **Keep my email address private** 체크
+2. **Keep my email address private** 체크 (아래 **Block command line pushes that expose my email**도 체크 추천)
 3. 그 아래 나오는 `숫자+아이디@users.noreply.github.com` 주소를 복사해서 아래 `user.email`에 넣음
 
-`core.autocrlf`는 윈도우와 리눅스의 줄바꿈 차이 때문에 파일 전체가 바뀐 것처럼 보이는 걸 막는 설정임. `pull.rebase false`는 pull할 때 merge 방식으로 합치라는 설정임.
+`user.name`은 커밋에 찍히는 작성자 이름임. 브랜치 이름(`sung_juwon`)과는 별개로, **각자 자기 컴퓨터에서 직접** 설정해야 함. 팀 규칙은 **영문 성+이름 붙여 쓰기**(예: `yoonhabeen`, `sungjuwon`).
+
+`--global`이 붙어 있어서 어느 폴더에서 실행하든 이 컴퓨터 전체에 적용됨. Git Bash를 열자마자 바로 실행하면 됨.
 
 ```bash
 # ===== 실행할 명령어 =====
-git config --global user.name "홍길동"
+git config --global user.name "sungjuwon"      # 본인 이름 영문 (성+이름 붙여서, 브랜치 이름과 별개)
 git config --global user.email "12345678+gildong@users.noreply.github.com"
-git config --global core.autocrlf true      # 윈도우만. 맥·리눅스는 input
-git config --global pull.rebase false
-git config --list
+git config --global core.autocrlf true      # 윈도우용 줄바꿈 설정. 리눅스는 input
+git config --global pull.rebase false       # pull할 때 merge 방식으로 합침
 ```
-
-```bash
-# ===== 실행 결과 =====
-user.name=홍길동
-user.email=12345678+gildong@users.noreply.github.com
-core.autocrlf=true
-pull.rebase=false
-...
-```
-
-### 1-3. 깃허브 초대 수락
-
-Git 담당에게 깃허브 아이디를 알려주면 Organization(팀 단위로 레포와 멤버를 관리하는 깃허브 계정)으로 초대가 옴. 메일이나 깃허브 알림에서 **Join**을 눌러야 푸시 권한이 생김.
 
 ### 1-4. 레포 클론
 
@@ -120,7 +118,8 @@ cd chargeops
 Cloning into 'chargeops'...
 ```
 
-- 처음 클론이나 푸시를 할 때 브라우저 창이 뜨면 깃허브에 로그인하고 **Authorize**를 누름. 한 번 하면 다음부터 자동 로그인됨
+- 브라우저 로그인 창이 뜨면 **본인 깃허브 계정**으로 로그인하고 **Authorize**를 누름. 한 번 하면 다음부터 자동 로그인됨
+- 클론 직후엔 `dev` 브랜치에 있음. **dev에서는 작업하지 않음** (푸시가 막혀 있음). 바로 1-5로 감
 - `origin`(깃허브에 있는 원격 레포의 별명): `origin/dev`는 "깃허브의 dev"라는 뜻임
 
 ### 1-5. 내 이름 브랜치로 이동
@@ -130,25 +129,77 @@ Cloning into 'chargeops'...
 ```bash
 # ===== 실행할 명령어 =====
 git switch sung_juwon        # 각자 자기 이름
-git branch -vv
 ```
 
 ```bash
 # ===== 실행 결과 =====
 branch 'sung_juwon' set up to track 'origin/sung_juwon'.
 Switched to a new branch 'sung_juwon'
-* sung_juwon  8b7e65c [origin/sung_juwon] chore: 레포 뼈대 ...
-  main        8b7e65c [origin/main] chore: 레포 뼈대 ...
 ```
 
 - `git switch 이름`: 깃허브에 같은 이름 브랜치가 있으면 자동으로 받아와서 짝(업스트림, upstream)으로 연결해줌. 이후로는 `git push`만 치면 됨
-- `*`가 붙은 게 지금 내가 있는 브랜치임
-- `[origin/내이름]`이 보이면 깃허브 브랜치와 제대로 연결된 것임
 - **`git switch -c`(새로 만들기)는 쓰지 않음.** 이미 있는 브랜치와 이름이 겹쳐서 에러남
+- 명령어를 치기 전에 프롬프트 끝의 괄호가 **(내 이름)**인지 항상 확인하는 습관을 들임
 
-### 1-6. 연습 PR 한 번 해보기
+### 1-6. 잘 됐는지 확인
 
-실제 작업 전에 흐름을 한 번 돌려봄. 아래 [2. 작업 흐름](#2-작업-흐름)대로 `docs/members.md`에 내 이름 한 줄을 추가해서 커밋 → 푸시 → PR → 승인 → 머지까지 해봄.
+아래 4가지가 다 맞으면 세팅 끝임. 하나라도 다르면 결과를 캡처해서 `#dev-git`에 올림.
+
+```bash
+# ===== 실행할 명령어 =====
+git config --global user.name
+git config --global user.email
+git branch -vv
+ls docs/setup
+```
+
+```bash
+# ===== 실행 결과 =====
+sungjuwon
+12345678+gildong@users.noreply.github.com
+  dev        fca3bee [origin/dev] Merge pull request #1 ...
+* sung_juwon fca3bee [origin/sung_juwon] Merge pull request #1 ...
+README.md  _template.md  versions.md
+```
+
+| 확인할 것 | 정상 |
+|---|---|
+| 이름 · 이메일 | 영문 성+이름, noreply 주소 |
+| `*`가 붙은 브랜치 | **내 이름 브랜치** |
+| 내 브랜치 옆 괄호 | `[origin/내이름]` (깃허브 브랜치와 연결됨) |
+| `ls docs/setup` | 파일 3개가 보임 (최신 내용을 받은 것) |
+
+### 1-7. 연습 PR 한 번 해보기
+
+실제 작업 전에 커밋 → 푸시 → PR → 승인 → 머지 흐름을 한 번 돌려봄. `docs/members.md`에 내 이름 한 줄을 추가함.
+
+```bash
+# ===== 실행할 명령어 =====
+echo "- 성주원 (sung_juwon)" >> docs/members.md
+git status
+git add docs/members.md
+git commit -m "docs: 팀원 이름 추가"
+git push
+```
+
+푸시 다음은 깃허브에서 함. 자세한 화면 설명은 [2. 작업 흐름](#2-작업-흐름)의 ⑥ ~ ⑨에 있음.
+
+1. 레포 화면 노란 배너의 **Compare & pull request** 클릭
+2. **base: dev ← compare: 내 이름**인지 확인
+3. 오른쪽 **Reviewers**에 2명 지정 → **Create pull request**
+4. 승인 2개가 모이면 **본인이** **Create a merge commit** → **Confirm merge** (**Delete branch는 누르지 않음**)
+5. 머지 후 Git Bash에서 다시 dev 최신 내용 합치기
+
+```bash
+# ===== 실행할 명령어 =====
+git fetch origin
+git merge origin/dev
+git push
+```
+
+- 6명이 같은 파일 끝에 한 줄씩 추가하는 거라서 **두 번째 사람부터 충돌이 날 수 있음.** 그러면 PR 화면에 `This branch has conflicts`가 뜸. 위 3줄을 먼저 실행하고, VS Code에서 `docs/members.md`를 열어 **Accept Both Changes**(두 줄 다 남기기) → 저장 → `git add docs/members.md` → `git commit -m "merge: dev 합치기"` → `git push` 하면 PR이 자동으로 갱신됨
+- 충돌 해결을 한 번 겪어보는 게 이 연습의 목적이기도 함
+- 다른 사람 PR의 리뷰 요청이 오면 [3. 리뷰어가 할 일](#3-리뷰어가-할-일)대로 승인함
 
 ---
 
@@ -274,7 +325,7 @@ git commit -m "merge: dev 최신 내용 반영"
 git push
 ```
 
-- 1-5에서 `-u`로 연결해뒀으니 `git push`만 치면 내 이름 브랜치로 올라감
+- 1-5에서 `git switch 내이름`으로 깃허브 브랜치와 연결해뒀으니 `git push`만 치면 내 이름 브랜치로 올라감
 - **main, dev로 직접 푸시는 막혀 있음.** 해도 거부됨
 
 ### ⑥ PR 만들기 (작성자 본인)
