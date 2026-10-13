@@ -1,2 +1,3 @@
-- 성주원 (sung_juwon)
-- 조인성  (cho_insung)
+- 조인성 (cho_insung)
+- 황채연 (hwang_chaeyeon)
+- 강영수 (kang_youngsoo)
