@@ -1,3 +1,6 @@
 - 조인성 (cho_insung)
 - 황채연 (hwang_chaeyeon)
 - 강영수 (kang_youngsoo)
+- 윤하빈 (yoon_habeen)
+- 성주원 (sung_juwon)
+- 김찬주 (kim_chanju)
