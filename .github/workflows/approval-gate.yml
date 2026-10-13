@@ -1,0 +1,148 @@
+# =====================================================================
+# approval-gate: Approve 버튼 또는 👍 를 "승인"으로 세어서
+#                REQUIRED_APPROVALS 명 이상이면 상태 체크 approval-gate 를 통과시킨다
+#                (지금 팀 규칙: 1명. 바꾸려면 아래 env 의 숫자만 고치면 됨)
+#
+# 승인으로 세는 것 (PR 작성자 본인 · 봇 · 쓰기 권한 없는 사람은 제외)
+#   1) Review 의 Approve  (가장 최근 커밋에 대한 것만)
+#   2) PR 본문에 단 👍 반응 (가장 최근 커밋 이후에 단 것만)
+#   3) 댓글 내용이 👍 · +1 · /approve · LGTM 중 하나 (가장 최근 커밋 이후)
+# 막는 것
+#   - 누구든 Request changes 를 남기면 실패
+#   - 새 커밋이 올라오면 그 전 승인은 무효 (stale 승인 취소와 같은 효과)
+#
+# 👍 반응은 GitHub 이 이벤트를 보내주지 않아서 10분마다 다시 센다
+# 바로 반영하려면 댓글로 👍 를 쓰거나 Actions 탭에서 수동 실행
+# =====================================================================
+name: approval-gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [dev, main]
+  pull_request_review:
+    types: [submitted, dismissed]
+  issue_comment:
+    types: [created, edited, deleted]
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+env:
+  REQUIRED_APPROVALS: "1"   # 머지에 필요한 승인 수 (Approve 또는 👍)
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: approval-gate-${{ github.event.pull_request.number || github.event.issue.number || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  count-approvals:
+    # 일반 이슈의 댓글은 무시하고 PR 댓글만 처리
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    steps:
+      - name: 승인 세기
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const REQUIRED = parseInt(process.env.REQUIRED_APPROVALS || '1', 10);  // 필요한 승인 수 (위 env 에서 설정)
+            const CONTEXT = 'approval-gate';          // 룰셋에 등록할 상태 체크 이름
+            const TARGETS = ['dev', 'main'];          // 검사할 base 브랜치
+            const OK_WORDS = ['👍', ':+1:', '+1', '/approve', 'lgtm'];
+            const { owner, repo } = context.repo;
+
+            const permCache = {};
+            async function canWrite(login) {
+              if (login in permCache) return permCache[login];
+              try {
+                const { data } = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: login });
+                permCache[login] = ['admin', 'maintain', 'write'].includes(data.permission);
+              } catch (e) {
+                permCache[login] = false;
+              }
+              return permCache[login];
+            }
+
+            async function evaluate(prNumber) {
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+              if (pr.state !== 'open' || !TARGETS.includes(pr.base.ref)) return;
+
+              const author = pr.user.login;
+              const headSha = pr.head.sha;
+              const { data: headCommit } = await github.rest.repos.getCommit({ owner, repo, ref: headSha });
+              const headTime = new Date(headCommit.commit.committer.date);
+
+              const approvers = new Set();
+              const blockers = new Set();
+
+              // 1) Review: 사람마다 가장 마지막 리뷰만 본다
+              const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 });
+              const lastReview = {};
+              for (const r of reviews) {
+                if (!r.user || r.user.type === 'Bot') continue;
+                if (!['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) continue;
+                lastReview[r.user.login] = r;
+              }
+              for (const [login, r] of Object.entries(lastReview)) {
+                if (r.state === 'APPROVED' && r.commit_id === headSha) approvers.add(login);
+                if (r.state === 'CHANGES_REQUESTED') blockers.add(login);
+              }
+
+              // 2) PR 본문의 👍 반응 (가장 최근 커밋 이후)
+              const reactions = await github.paginate(github.rest.reactions.listForIssue, { owner, repo, issue_number: prNumber, content: '+1', per_page: 100 });
+              for (const re of reactions) {
+                if (!re.user || re.user.type === 'Bot') continue;
+                if (new Date(re.created_at) > headTime) approvers.add(re.user.login);
+              }
+
+              // 3) 👍 · +1 · /approve · LGTM 댓글 (가장 최근 커밋 이후)
+              const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNumber, per_page: 100 });
+              for (const c of comments) {
+                if (!c.user || c.user.type === 'Bot') continue;
+                if (new Date(c.created_at) <= headTime) continue;
+                const body = (c.body || '').trim().toLowerCase();
+                if (OK_WORDS.includes(body)) approvers.add(c.user.login);
+              }
+
+              // 작성자 본인 제외, 쓰기 권한 있는 사람만 인정
+              approvers.delete(author);
+              const valid = [];
+              for (const login of approvers) {
+                if (blockers.has(login)) continue;
+                if (await canWrite(login)) valid.push(login);
+              }
+
+              let state, description;
+              if (blockers.size > 0) {
+                state = 'failure';
+                description = `수정 요청 있음: ${[...blockers].join(', ')}`;
+              } else if (valid.length >= REQUIRED) {
+                state = 'success';
+                description = `승인 ${valid.length}/${REQUIRED}: ${valid.join(', ')}`;
+              } else {
+                state = 'pending';
+                description = `승인 ${valid.length}/${REQUIRED}${valid.length ? ': ' + valid.join(', ') : ''}`;
+              }
+
+              await github.rest.repos.createCommitStatus({
+                owner, repo, sha: headSha, state, context: CONTEXT,
+                description: description.slice(0, 140),
+                target_url: pr.html_url,
+              });
+              core.info(`#${prNumber} → ${state} (${description})`);
+            }
+
+            // 이벤트에 따라 검사할 PR 고르기
+            let numbers = [];
+            if (context.payload.pull_request) numbers = [context.payload.pull_request.number];
+            else if (context.payload.issue && context.payload.issue.pull_request) numbers = [context.payload.issue.number];
+            else {
+              const open = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
+              numbers = open.filter(p => TARGETS.includes(p.base.ref)).map(p => p.number);
+            }
+            for (const n of numbers) await evaluate(n);

@@ -1,1 +1,2 @@
-﻿- 강영수 (kang_youngsoo)
+- 황채연 (hwang_chaeyeon)
+- 강영수 (kang_youngsoo)
