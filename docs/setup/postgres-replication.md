@@ -57,7 +57,7 @@ sudo bash db/ops/pgbouncer/install-pgbouncer.sh
 | `zz-local.conf` | 설정은 Primary 것이 복사되어 옴. 메모리가 다르면 이 파일만 덮어씀 (conf.d 는 이름 순) |
 | `install-pgbouncer.sh` | 쓰기 풀은 두 서버 모두 자기 서버(127.0.0.1). 읽기 풀은 Primary에서는 Standby로, Standby에서는 자기 자신으로 |
 
-`archive_command`(pgBackRest)는 WBS 2.8 설정(`db/ops/pgbackrest`)과 함께 켭니다. 저장소 설정 전이면 WAL이 `pg_wal`에 쌓이므로 2.8을 바로 이어서 합니다.
+`archive_command`(pgBackRest)는 켜진 상태라, 저장소 설정 전이면 WAL이 `pg_wal`에 쌓입니다 → 바로 이어서 [`pgbackrest-pitr.md`](pgbackrest-pitr.md)(WBS 2.8)의 ① · ②를 합니다.
 
 ## 3. 설정 파일
 
