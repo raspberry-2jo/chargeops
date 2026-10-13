@@ -25,6 +25,11 @@ wg*.conf
 # Sealed Secrets로 암호화하기 전의 평문 Secret
 *-secret.yaml
 !*-sealedsecret.yaml
+# DB: 백업 설정(S3 키) · PgBouncer 계정 목록(비밀번호 해시) · psql 비밀번호 파일
+# 값을 지운 파일명.example 만 커밋 (S2-1)
+pgbackrest.conf
+userlist.txt
+.pgpass
 
 # ----- AWS / Terraform -----
 .aws/
