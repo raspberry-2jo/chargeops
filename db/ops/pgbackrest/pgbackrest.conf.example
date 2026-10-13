@@ -1,0 +1,30 @@
+# /etc/pgbackrest/pgbackrest.conf 양식 — WAL 보관 · 전체 백업 저장소 = S3 (온프렘은 MinIO 등 S3 호환)
+#   아키텍처의 "데이터망 → S3 443" 흐름. 두 DB 서버(db-01 · db-02)에 같은 파일을 둔다 (승격된 쪽도 같은 저장소에 올리게)
+#   진짜 파일은 키가 들어가므로 커밋하지 않는다(.gitignore, README S2-1). 놓는 법: sudo bash db/ops/pgbackrest/install-pgbackrest.sh
+#   <…> 두 칸은 install-pgbackrest.sh 가 입력받아 채운다. 나머지는 실습 값 — 저장소가 다르면 이 파일에서 고친 뒤 실행
+#   설치 순서 · 확인: docs/setup/pgbackrest-pitr.md
+[global]
+repo1-type=s3
+repo1-s3-endpoint=s3.chargeops.lab
+repo1-s3-bucket=pgbackrest
+repo1-s3-region=us-east-1
+repo1-s3-uri-style=path
+repo1-s3-key=<S3 접근 키>
+repo1-s3-key-secret=<S3 비밀 키>
+repo1-storage-ca-file=/etc/pki/ca-trust/source/anchors/chargeops-ca.crt
+repo1-path=/chargeops
+repo1-retention-full=2
+compress-type=zst
+process-max=2
+start-fast=y
+log-level-console=info
+
+[chargeops]
+pg1-path=/var/lib/pgsql/17/data
+
+# ── 실제 AWS S3 를 쓸 때 바꿀 줄 (.env.example 의 S3_BUCKET_BACKUP 과 같은 버킷) ──
+# repo1-s3-endpoint=s3.ap-northeast-2.amazonaws.com
+# repo1-s3-region=ap-northeast-2
+# repo1-s3-bucket=<S3_BUCKET_BACKUP>
+# repo1-s3-uri-style=host           (path 줄을 지우거나 host 로)
+# repo1-storage-ca-file 줄은 지움     (공인 인증서라 사설 CA 가 필요 없음)
