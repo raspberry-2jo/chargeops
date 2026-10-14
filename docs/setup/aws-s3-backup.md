@@ -3,7 +3,7 @@
 - 담당: 강영수
 - 관련 WBS: 2.8 후속(원격 보관) · 3.6 원본 S3 보관 · 4.5 DR 훈련 준비
 - 버전: versions.md 참고 (pgBackRest 2.59, PostgreSQL 17)
-- 상태: **개인 AWS 계정으로 시험 완료 (2026-10-14)**. 팀 계정은 2.2 의 IAM 을 받은 뒤 같은 절차로 버킷 이름 · 키 · 경로만 바꾼다 (6장)
+- 상태: **개인 AWS 계정으로 시험 완료 (2026-10-14)** — 설치 · 복원 훈련(RTO 54초) · AWS 장애 감지 시험(경보 1~2분). 팀 계정은 2.2 의 IAM 을 받은 뒤 같은 절차로 버킷 이름 · 키 · 경로만 바꾼다 (6장)
 - 앞 단계: [`pgbackrest-pitr.md`](pgbackrest-pitr.md) (repo1 = 실습 MinIO), [`public-api-collector.md`](public-api-collector.md)
 
 ## 1. 왜 / 무엇을
@@ -159,6 +159,17 @@ ssh db-01 'sudo -u postgres pgbackrest --stanza=chargeops info'                 
 psql -h db-01 -p 5432 -U dba chargeops -c "select archived_count, failed_count, last_archived_wal, last_failed_time from pg_stat_archiver"
 #   몇 분 뒤 다시 쳐서 failed_count 는 그대로 · archived_count 만 늘면 두 저장소 모두 정상
 #   (source ~/.chargeops.env 뒤에는 기본 포트가 6432(PgBouncer)라 dba 는 -p 5432 를 꼭 붙인다)
+
+# ===== AWS 장애 감지 시험 (선택 · 약 10분 · 데이터 손실 없음 — 막힌 동안 WAL 이 db-01 디스크에 쌓였다가 되돌리면 따라잡음) =====
+# ① 기준값: 실패 수 · 마지막 보관 WAL · 지금 WAL (뒤의 두 값이 같거나 바로 다음 칸이면 정상)
+psql -h db-01 -p 5432 -U dba chargeops -Atc "select failed_count, last_archived_wal, pg_walfile_name(pg_current_wal_lsn()) from pg_stat_archiver"
+# ② AWS 에 못 올리게: 버킷 이름만 틀리게 (키는 건드리지 않음)
+ssh db-01 "sudo sed -i 's/^repo2-s3-bucket=.*/&-broken/' /etc/pgbackrest/conf.d/repo2-aws.conf"
+# ③ 2분 뒤 ① 을 다시 → 실패 수 증가 · 마지막 보관 WAL 멈춤. 경보 확인:
+curl -s http://<Alertmanager 주소>:9093/api/v2/alerts | jq -r '.[] | select(.labels.alertname=="WalArchiveFailing") | "\(.labels.code) \(.labels.severity) \(.status.state)"'
+# ④ 되돌리기 → 90초 뒤 ① 다시(마지막 보관이 지금 WAL 을 따라잡음) + check(repo1 · repo2 둘 다 successfully archived)
+ssh db-01 "sudo sed -i 's/-broken\$//' /etc/pgbackrest/conf.d/repo2-aws.conf && sudo grep '^repo2-s3-bucket=' /etc/pgbackrest/conf.d/repo2-aws.conf"
+ssh db-01 'sudo -u postgres pgbackrest --stanza=chargeops check'
 ```
 ```
 # ===== 실행 결과 (2026-10-14, 개인 계정 시험) =====
@@ -179,6 +190,17 @@ db-02                db-02 는 Standby — 백업은 Primary 에서 받는다
 WAL 받는 곳          restore_command = 'pgbackrest … --repo=2 --stanza=chargeops archive-get %f "%p"'  → WAL 도 AWS 에서
 검증                 이번 PITR-BEFORE(13:10:18) 있음 · 이번 PITR-AFTER 없음 (그 아래 줄은 T 보다 앞선 지난 훈련 기록)
 RTO                  54초 (복원 시작 → T 까지 재생 · 승격) — 내려받기 34.5초 + 12:21 차등 이후 약 49분치 WAL 재생
+
+# AWS 장애 감지 시험 (13:30 무렵 ~ 13:37, db-01 의 repo2 버킷 이름 끝에 -broken 을 붙여 AWS 에 못 올리게 → 되돌림)
+시작 전              failed_count 8 · 마지막 보관 …14000000FF · 지금 WAL …1500000000 (바로 다음 칸 = 정상)
+막고 2분 기다린 뒤      failed_count 21 · 마지막 보관 …14000000FF 그대로 · 지금 WAL …1500000005 · 마지막 실패 13:33:56
+                     → MinIO 는 멀쩡한데도 보관이 통째로 멈춤. 다 쓴 WAL 5개(16MB × 5 = 80MB)가 db-01 디스크(pg_wal)에서 대기
+경보                 Alertmanager: WalArchiveFailing  P-04 sev2 active "WAL 아카이브 2회 이상 실패"
+                     Grafana 통합 대시보드: 맨 위 '백업 · WAL 보관' 6분(노랑) · '조치 필요' 표에 '높음' 한 줄 (경과 4분 25초)
+                     → 마지막 정상 보관(6분 전)에서 1~2분 안에 경보
+되돌리고 90초         failed_count 29 에서 멈춤 · 마지막 보관 …1500000007 · 지금 WAL …1500000008 → 밀린 WAL 을 저절로 따라잡음
+check                …1500000008 successfully archived to … on repo1 / … on repo2 (562ms)
+Grafana              '백업 · WAL 보관' 21초(초록). 경보는 규칙이 '15분 동안의 실패 수'를 봐서 마지막 실패 약 15분 뒤 저절로 풀림
 ```
 
 | 복원 훈련 | 저장소 | 복원(내려받기) | RTO |
@@ -188,6 +210,13 @@ RTO                  54초 (복원 시작 → T 까지 재생 · 승격) — 내
 
 - 차이는 거의 인터넷으로 내려받는 시간. 마지막 백업 이후 WAL 이 길수록 재생이 길어진다 → 매일 차등 백업(2-6)이 RTO 를 묶어 둔다
 - 실제 DR(4.5)의 RTO 는 여기에 **새 서버 준비 시간**(EC2 생성 · PostgreSQL 설치)이 더해진다 — 목표 30분과 비교할 때 이 둘을 합산
+
+장애 감지 시험으로 확인한 것:
+
+- PostgreSQL 은 보관에 실패하면 3번 다시 해 보고 쉬었다가 또 한다 → `failed_count` 가 **분당 약 3** 씩 오름 (8 → 21 → 29, 약 7분 막힘). 규칙 `increase(pg_stat_archiver_failed_count[15m]) >= 2`(차트 `prometheusrule.yaml`, P-04)가 바로 걸린다
+- 막힌 동안 WAL 은 **1분에 16MB 이상**(archive_timeout 60초) db-01 디스크에 쌓인다 → 하루 막히면 약 23GB, 디스크가 차면 PostgreSQL 이 멈춘다. 그 사이 데이터는 Standby(db-02)가 스트리밍 복제로 받고 있어 바로 잃지는 않지만, **백업 저장소 기준 RPO 는 막힌 시간만큼 늘어난다**
+- 원인을 없애면 사람 손 없이 따라잡는다 (되돌린 뒤 90초)
+- Grafana '백업 · WAL 보관' 칸은 5분 노랑 · 15분 빨강 (대시보드 `chargeops-ops`). 이번 시험은 노랑까지
 
 AWS 콘솔에서 보이는 곳:
 
@@ -207,7 +236,7 @@ AWS 콘솔에서 보이는 곳:
 | `pg_stat_archiver.failed_count` 가 8 늘어남 | repo2 설정 파일을 놓은 뒤 `stanza-create` 전 몇 초 동안 `archive-push` 가 repo2 에서 실패 → 설정을 놓으면 **바로** stanza-create. 그 뒤로는 증가 없음 |
 | `psql: … port 6432 failed: FATAL: login rejected` | `source ~/.chargeops.env` 뒤 기본 포트가 6432(PgBouncer, 앱 전용)라 dba 가 거부됨 → `-p 5432` |
 | AWS 백업으로 복원 훈련이 안 됨 (예방) | 저장소를 지정하지 않은 restore 는 repo1 부터 찾는다(공식 문서) → `PITR_REPO=2 bash db/ops/pgbackrest/pitr-drill.sh` |
-| ⚠ AWS 에 못 올리면 MinIO 보관까지 멈춤 | 저장소가 여럿이면 `archive-push` 는 전부에 올려야 성공 — 비동기(`archive-async`)가 아니면 한 곳이 막힐 때 다른 곳도 한 칸 이상 못 나간다(공식 문서). WAL 이 DB 디스크(pg_wal)에 쌓임 → Grafana "WAL 보관" 감시 필수. 이 감시의 지표(postgres_exporter)가 실습 PC 에 없어 2026-10-14 에 설치함(팀 구축 가이드 STEP 19 ②) |
+| ⚠ AWS 에 못 올리면 MinIO 보관까지 멈춤 — **실측 (4장 장애 감지 시험)** | 저장소가 여럿이면 `archive-push` 는 전부에 올려야 성공 — 비동기(`archive-async`)가 아니면 한 곳이 막힐 때 다른 곳도 한 칸 이상 못 나간다(공식 문서). 시험에서 `last_archived_wal` 이 7분 동안 그대로, WAL 5개 이상이 pg_wal 에 쌓임. 감지는 경보 P-04(1~2분) · Grafana "WAL 보관". 이 지표(postgres_exporter)가 실습 PC 에 없어 2026-10-14 에 설치함(팀 구축 가이드 STEP 19 ②) — **설치 전에는 이 경보가 울릴 수 없었음** |
 | 차등 백업이 생각보다 큼 (361MB, 전체 1시간 뒤) | pgBackRest 기본은 **파일 단위** — 수집으로 매 5분 바뀌는 큰 테이블 파일은 통째로 다시 올라간다. 압축 후 크기는 작지만, 줄이려면 블록 단위(`repo2-block=y` + `repo2-bundle=y`)를 검토 (6장) |
 | 결제 화면에서 리전이 모두 자물쇠 | 결제는 리전 없는 서비스라 잠김(정상). 버킷 만들 때는 S3 화면에서 **서울**인지 확인 |
 
@@ -216,5 +245,9 @@ AWS 콘솔에서 보이는 곳:
 - **팀 계정으로 옮기기 (2.2 IAM 담당과)**: 팀 계정의 기존 DB 백업 버킷을 쓰고, `aws-s3-policy.example.json` 그대로 정책 · 프로그램용 사용자 · 키를 요청. 실습 VM 은 `test-chargeops`, 정식 환경은 다른 경로(예: `chargeops`) — 백업 저장소는 DB 클러스터마다 고유 번호에 묶여 새로 설치한 DB 가 같은 경로를 못 이어 쓴다
 - ~~AWS 저장소 복원 훈련 · RTO~~ → **완료 (2026-10-14)**: RTO 54초 (4장). 다음은 EC2 DR(4.5, Terraform) — 새 서버에 PostgreSQL 17 + pgBackRest 를 놓고 같은 repo2 에서 복원
 - RTO 를 더 줄이려면: WAL 미리 받기(`archive-async=y` + `archive-get-queue-max`) · 복원 병렬(`--process-max`) 검토
-- `archive-async` 도입 여부 (AWS 장애 때 MinIO 보관까지 멈추지 않게) · 블록 단위 차등 여부
+- AWS 장애가 길어질 때 (4장 장애 감지 시험: 지금은 보관 전체가 멈추고 pg_wal 이 1분에 16MB 이상 늘어남) — 고를 수 있는 것:
+  - 그대로: 경보 P-04 를 받으면 사람이 원인(키 · 네트워크 · 버킷)을 고친다. 하루 안에 고치면 디스크 여유로 버팀
+  - `archive-async=y` (+ `spool-path`): 한 저장소가 막혀도 다른 저장소에는 계속 올린다(공식 문서 Multiple Repositories). AWS 쪽에 빈 구간이 남는지는 같은 시험(버킷 이름 틀리기)으로 확인한 뒤 결정
+  - `archive-push-queue-max`: 쌓인 WAL 이 상한을 넘으면 "보관했다"고 하고 버린다 → 디스크는 지키지만 그 뒤로 PITR 이 끊겨 새 백업이 필요(공식 문서: "Better to lose the backup than have PostgreSQL go down")
+- 블록 단위 차등 여부
 - 개인 계정 시험 정리: 팀 계정으로 옮긴 뒤 개인 버킷을 비우고 삭제 · `chargeops-lab-s3` 키 비활성화 → 삭제
