@@ -1,5 +1,9 @@
 # ChargeOps v2 CI/CD 적용 기록과 실행 절차
 
+> 원본 저장소의 적용 기록입니다. 현재 앱 경로, Jenkins SCM/Script Path와 배포 절차는
+> [infra/app 이전 및 CI/CD 연결 문서](../../../docs/infra/app-cicd-migration.md)를 따릅니다.
+> 현재 로컬 작업 브랜치는 `kim_chanju`이며, 원격 Push와 서버 설정 변경은 수행하지 않았습니다.
+
 적용일: 2026-10-14. 로컬 `main`의 기준 커밋은 `0007900`입니다.
 작업 경로: `C:\Users\SBA_USER\codex-test\git-test\chargeops`.
 

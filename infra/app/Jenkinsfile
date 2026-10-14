@@ -4,22 +4,41 @@ pipeline {
     timestamps()
     disableConcurrentBuilds()
     skipDefaultCheckout(true)
+    timeout(time: 45, unit: 'MINUTES')
   }
   triggers { pollSCM('H/5 * * * *') }
   parameters {
     booleanParam(name: 'BUILD_ALL_IMAGES', defaultValue: false,
       description: 'Build all nine images. The first build automatically builds all images.')
   }
-  environment { REGISTRY = 'chanjookim' }
+  environment {
+    REGISTRY = 'chanjookim'
+    APP_ROOT = 'infra/app'
+    PUBLISH_BRANCH = 'dev'
+  }
   stages {
     stage('Checkout') {
       steps {
-        checkout scm
         script {
+          def checkoutVars = checkout scm
+          env.CHECKOUT_BRANCH = (checkoutVars.GIT_BRANCH ?: env.GIT_BRANCH ?: '').replaceFirst(/^origin\//, '')
+          env.PUBLISH_IMAGES = (env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH && !env.CHANGE_ID).toString()
           def sha = sh(script: 'git rev-parse --short=12 HEAD', returnStdout: true).trim()
           env.IMAGE_TAG = 'build-' + env.BUILD_NUMBER + '-' + sha
           echo 'IMAGE_TAG=' + env.IMAGE_TAG
+          echo 'Branch=' + env.CHECKOUT_BRANCH + ', publish images=' + env.PUBLISH_IMAGES
         }
+      }
+    }
+    stage('Check agent tools') {
+      steps {
+        sh '''
+          set -eu
+          command -v python3.12
+          python3.12 -m venv --help >/dev/null
+          command -v docker
+          docker info >/dev/null
+        '''
       }
     }
     stage('Detect changed images') {
@@ -32,10 +51,13 @@ pipeline {
             if [ -z "$BASE" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
               printf '%s\\n' '__BUILD_ALL__'
             else
-              git diff --name-only "$BASE" "$CURRENT_COMMIT"
+              git diff --name-only "$BASE" "$CURRENT_COMMIT" -- "$APP_ROOT/"
             fi
           ''', returnStdout: true).trim()
-          def changedFiles = diffOutput ? diffOutput.readLines().findAll { it } : []
+          def changedFiles = diffOutput ? diffOutput.readLines().findAll { it }.collect { path ->
+            path == '__BUILD_ALL__' ? path : path.substring(env.APP_ROOT.length() + 1)
+          } : []
+          env.APP_CHANGED = (!changedFiles.isEmpty() || params.BUILD_ALL_IMAGES).toString()
           def legacyImages = ['chargeops-chatops-bot', 'chargeops-alert-router', 'chargeops-mock-csms']
           def appImages = ['chargeops-ai-gateway', 'chargeops-v2-chatops-bot', 'chargeops-v2-csms',
                            'chargeops-v2-notifier', 'chargeops-v2-vcharger', 'chargeops-v2-collector']
@@ -87,20 +109,24 @@ pipeline {
       }
     }
     stage('Test (Python 3.12)') {
+      when { expression { env.APP_CHANGED == 'true' } }
       steps {
-        sh '''
+        dir(env.APP_ROOT) {
+          sh '''
           set -eu
           python3.12 -m venv .ci-venv
           .ci-venv/bin/python -m pip install --upgrade pip
           .ci-venv/bin/python -m pip install -r requirements.txt -r requirements-dev.txt
           .ci-venv/bin/python -m pytest -q tests/
-        '''
+          '''
+        }
       }
     }
     stage('Docker Build: changed images only') {
       when { expression { env.BUILD_IMAGES?.trim() } }
       steps {
-        sh '''
+        dir(env.APP_ROOT) {
+          sh '''
           set -eu
           build_if_selected() {
             NAME="$1"
@@ -109,8 +135,7 @@ pipeline {
             case " $BUILD_IMAGES " in
               *" $NAME "*)
                 docker build --pull -f "$DOCKERFILE" \\
-                  -t "$REGISTRY/$NAME:$IMAGE_TAG" \\
-                  -t "$REGISTRY/$NAME:dev" "$CONTEXT"
+                  -t "$REGISTRY/$NAME:$IMAGE_TAG" "$CONTEXT"
                 ;;
             esac
           }
@@ -123,11 +148,12 @@ pipeline {
           build_if_selected chargeops-v2-notifier apps/notifier/Dockerfile apps
           build_if_selected chargeops-v2-vcharger apps/vcharger/Dockerfile apps
           build_if_selected chargeops-v2-collector apps/collector/Dockerfile apps
-        '''
+          '''
+        }
       }
     }
     stage('Docker Hub Login and Push') {
-      when { expression { env.BUILD_IMAGES?.trim() } }
+      when { expression { env.BUILD_IMAGES?.trim() && env.PUBLISH_IMAGES == 'true' } }
       steps {
         withCredentials([usernamePassword(credentialsId: 'dockerhub-write',
           usernameVariable: 'DH_USER', passwordVariable: 'DH_TOKEN')]) {
@@ -139,16 +165,24 @@ pipeline {
             printf '%s' "$DH_TOKEN" | docker login docker.io -u "$DH_USER" --password-stdin
             for NAME in $BUILD_IMAGES; do
               docker push "$REGISTRY/$NAME:$IMAGE_TAG"
+              docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$REGISTRY/$NAME:dev"
               docker push "$REGISTRY/$NAME:dev"
             done
             docker logout docker.io
-          '''
+            '''
         }
       }
     }
   }
   post {
-    always { sh 'rm -rf .ci-venv || true' }
-    success { echo 'Push completed: ' + (env.BUILD_IMAGES ?: '(no image changes)') + ' : ' + env.IMAGE_TAG }
+    always {
+      dir(env.APP_ROOT) {
+        sh 'rm -rf .ci-venv || true'
+      }
+    }
+    success {
+      echo 'CI completed: ' + (env.BUILD_IMAGES ?: '(no image changes)') + ' : ' + env.IMAGE_TAG
+      echo 'Image publication is restricted to ' + env.PUBLISH_BRANCH + '; current branch=' + env.CHECKOUT_BRANCH
+    }
   }
 }
