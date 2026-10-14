@@ -172,7 +172,22 @@ pg_stat_archiver     archived_count 1401 → 1402, failed_count 8 그대로 (마
 타이머               NEXT Thu 2026-10-15 03:40:00 KST
 손으로 1회 (수요일)    repo1 diff backup size = 421.7MB (4.7초) · repo2 diff backup size = 361.1MB (6.5초) · expire 정상
 db-02                db-02 는 Standby — 백업은 Primary 에서 받는다
+
+# AWS 저장소 복원 훈련 (13:10, PITR_REPO=2 bash db/ops/pgbackrest/pitr-drill.sh → db-02 의 임시 폴더 · 5433)
+복원                 repo2: restore backup set 20261014-110915F_20261014-122146D, recovery will start at 12:21:46
+                     restore size = 498.5MB, file total = 1522 — 34.5초 (AWS 에서 내려받기)
+WAL 받는 곳          restore_command = 'pgbackrest … --repo=2 --stanza=chargeops archive-get %f "%p"'  → WAL 도 AWS 에서
+검증                 이번 PITR-BEFORE(13:10:18) 있음 · 이번 PITR-AFTER 없음 (그 아래 줄은 T 보다 앞선 지난 훈련 기록)
+RTO                  54초 (복원 시작 → T 까지 재생 · 승격) — 내려받기 34.5초 + 12:21 차등 이후 약 49분치 WAL 재생
 ```
+
+| 복원 훈련 | 저장소 | 복원(내려받기) | RTO |
+|---|---|---|---|
+| 2026-10-12 (2.8, [`pgbackrest-pitr.md`](pgbackrest-pitr.md)) | repo1 MinIO (같은 PC) | 10.5초 | 15초 |
+| 2026-10-14 | **repo2 AWS S3 (서울)** | 34.5초 | **54초** |
+
+- 차이는 거의 인터넷으로 내려받는 시간. 마지막 백업 이후 WAL 이 길수록 재생이 길어진다 → 매일 차등 백업(2-6)이 RTO 를 묶어 둔다
+- 실제 DR(4.5)의 RTO 는 여기에 **새 서버 준비 시간**(EC2 생성 · PostgreSQL 설치)이 더해진다 — 목표 30분과 비교할 때 이 둘을 합산
 
 AWS 콘솔에서 보이는 곳:
 
@@ -199,6 +214,7 @@ AWS 콘솔에서 보이는 곳:
 ## 6. 팀에서 정할 것 · 다음
 
 - **팀 계정으로 옮기기 (2.2 IAM 담당과)**: 팀 계정의 기존 DB 백업 버킷을 쓰고, `aws-s3-policy.example.json` 그대로 정책 · 프로그램용 사용자 · 키를 요청. 실습 VM 은 `test-chargeops`, 정식 환경은 다른 경로(예: `chargeops`) — 백업 저장소는 DB 클러스터마다 고유 번호에 묶여 새로 설치한 DB 가 같은 경로를 못 이어 쓴다
-- **AWS 저장소 복원 훈련 · RTO** (승인 뒤): `PITR_REPO=2 bash db/ops/pgbackrest/pitr-drill.sh` → 그다음 EC2 DR(4.5, Terraform)
+- ~~AWS 저장소 복원 훈련 · RTO~~ → **완료 (2026-10-14)**: RTO 54초 (4장). 다음은 EC2 DR(4.5, Terraform) — 새 서버에 PostgreSQL 17 + pgBackRest 를 놓고 같은 repo2 에서 복원
+- RTO 를 더 줄이려면: WAL 미리 받기(`archive-async=y` + `archive-get-queue-max`) · 복원 병렬(`--process-max`) 검토
 - `archive-async` 도입 여부 (AWS 장애 때 MinIO 보관까지 멈추지 않게) · 블록 단위 차등 여부
 - 개인 계정 시험 정리: 팀 계정으로 옮긴 뒤 개인 버킷을 비우고 삭제 · `chargeops-lab-s3` 키 비활성화 → 삭제
