@@ -1,0 +1,188 @@
+pipeline {
+  agent { label 'chargeops-agent' }
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    skipDefaultCheckout(true)
+    timeout(time: 45, unit: 'MINUTES')
+  }
+  triggers { pollSCM('H/5 * * * *') }
+  parameters {
+    booleanParam(name: 'BUILD_ALL_IMAGES', defaultValue: false,
+      description: 'Build all nine images. The first build automatically builds all images.')
+  }
+  environment {
+    REGISTRY = 'chanjookim'
+    APP_ROOT = 'infra/app'
+    PUBLISH_BRANCH = 'dev'
+  }
+  stages {
+    stage('Checkout') {
+      steps {
+        script {
+          def checkoutVars = checkout scm
+          env.CHECKOUT_BRANCH = (checkoutVars.GIT_BRANCH ?: env.GIT_BRANCH ?: '').replaceFirst(/^origin\//, '')
+          env.PUBLISH_IMAGES = (env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH && !env.CHANGE_ID).toString()
+          def sha = sh(script: 'git rev-parse --short=12 HEAD', returnStdout: true).trim()
+          env.IMAGE_TAG = 'build-' + env.BUILD_NUMBER + '-' + sha
+          echo 'IMAGE_TAG=' + env.IMAGE_TAG
+          echo 'Branch=' + env.CHECKOUT_BRANCH + ', publish images=' + env.PUBLISH_IMAGES
+        }
+      }
+    }
+    stage('Check agent tools') {
+      steps {
+        sh '''
+          set -eu
+          command -v python3.12
+          python3.12 -m venv --help >/dev/null
+          command -v docker
+          docker info >/dev/null
+        '''
+      }
+    }
+    stage('Detect changed images') {
+      steps {
+        script {
+          def diffOutput = sh(script: '''
+            set -eu
+            CURRENT_COMMIT="$(git rev-parse HEAD)"
+            BASE="${GIT_PREVIOUS_SUCCESSFUL_COMMIT:-}"
+            if [ -z "$BASE" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+              printf '%s\\n' '__BUILD_ALL__'
+            else
+              git diff --name-only "$BASE" "$CURRENT_COMMIT" -- "$APP_ROOT/"
+            fi
+          ''', returnStdout: true).trim()
+          def changedFiles = diffOutput ? diffOutput.readLines().findAll { it }.collect { path ->
+            path == '__BUILD_ALL__' ? path : path.substring(env.APP_ROOT.length() + 1)
+          } : []
+          env.APP_CHANGED = (!changedFiles.isEmpty() || params.BUILD_ALL_IMAGES).toString()
+          def legacyImages = ['chargeops-chatops-bot', 'chargeops-alert-router', 'chargeops-mock-csms']
+          def appImages = ['chargeops-ai-gateway', 'chargeops-v2-chatops-bot', 'chargeops-v2-csms',
+                           'chargeops-v2-notifier', 'chargeops-v2-vcharger', 'chargeops-v2-collector']
+          def allImages = legacyImages + appImages
+          def selected = new LinkedHashSet()
+          def appPaths = [
+            'ai_gateway': 'chargeops-ai-gateway',
+            'chatops_bot': 'chargeops-v2-chatops-bot',
+            'csms': 'chargeops-v2-csms',
+            'notifier': 'chargeops-v2-notifier',
+            'vcharger': 'chargeops-v2-vcharger',
+            'collector': 'chargeops-v2-collector'
+          ]
+          def legacyDockerfiles = [
+            'docker/chatops-bot.Dockerfile': 'chargeops-chatops-bot',
+            'docker/router.Dockerfile': 'chargeops-alert-router',
+            'docker/mock-csms.Dockerfile': 'chargeops-mock-csms'
+          ]
+          if (params.BUILD_ALL_IMAGES || changedFiles.contains('__BUILD_ALL__')) {
+            selected.addAll(allImages)
+            echo 'First build or BUILD_ALL_IMAGES=true: building all images.'
+          } else {
+            changedFiles.each { path ->
+              if (path == 'Jenkinsfile') {
+                selected.addAll(allImages)
+              } else if (path == '.dockerignore' || path.startsWith('app/') || path == 'requirements.txt') {
+                selected.addAll(legacyImages)
+              } else if (legacyDockerfiles.containsKey(path)) {
+                selected.add(legacyDockerfiles[path])
+              } else if (path.startsWith('docker/')) {
+                selected.addAll(legacyImages)
+              } else if (path.startsWith('apps/common/')) {
+                selected.addAll(['chargeops-ai-gateway', 'chargeops-v2-chatops-bot', 'chargeops-v2-notifier'])
+              } else if (path.startsWith('apps/')) {
+                def matched = appPaths.find { folder, image -> path.startsWith('apps/' + folder + '/') }
+                if (matched) { selected.add(matched.value) }
+                else { selected.addAll(appImages) }
+              } else if (path == 'README.md' || path == 'requirements-dev.txt' ||
+                         path.startsWith('docs/') || path.startsWith('tests/')) {
+                echo 'Documentation/test-only change: ' + path
+              } else {
+                selected.addAll(allImages)
+              }
+            }
+          }
+          env.BUILD_IMAGES = selected.join(' ')
+          echo 'Selected images: ' + (env.BUILD_IMAGES ?: '(none)')
+        }
+      }
+    }
+    stage('Test (Python 3.12)') {
+      when { expression { env.APP_CHANGED == 'true' } }
+      steps {
+        dir(env.APP_ROOT) {
+          sh '''
+          set -eu
+          python3.12 -m venv .ci-venv
+          .ci-venv/bin/python -m pip install --upgrade pip
+          .ci-venv/bin/python -m pip install -r requirements.txt -r requirements-dev.txt
+          .ci-venv/bin/python -m pytest -q tests/
+          '''
+        }
+      }
+    }
+    stage('Docker Build: changed images only') {
+      when { expression { env.BUILD_IMAGES?.trim() } }
+      steps {
+        dir(env.APP_ROOT) {
+          sh '''
+          set -eu
+          build_if_selected() {
+            NAME="$1"
+            DOCKERFILE="$2"
+            CONTEXT="$3"
+            case " $BUILD_IMAGES " in
+              *" $NAME "*)
+                docker build --pull -f "$DOCKERFILE" \\
+                  -t "$REGISTRY/$NAME:$IMAGE_TAG" "$CONTEXT"
+                ;;
+            esac
+          }
+          build_if_selected chargeops-chatops-bot docker/chatops-bot.Dockerfile .
+          build_if_selected chargeops-alert-router docker/router.Dockerfile .
+          build_if_selected chargeops-mock-csms docker/mock-csms.Dockerfile .
+          build_if_selected chargeops-ai-gateway apps/ai_gateway/Dockerfile apps
+          build_if_selected chargeops-v2-chatops-bot apps/chatops_bot/Dockerfile apps
+          build_if_selected chargeops-v2-csms apps/csms/Dockerfile apps
+          build_if_selected chargeops-v2-notifier apps/notifier/Dockerfile apps
+          build_if_selected chargeops-v2-vcharger apps/vcharger/Dockerfile apps
+          build_if_selected chargeops-v2-collector apps/collector/Dockerfile apps
+          '''
+        }
+      }
+    }
+    stage('Docker Hub Login and Push') {
+      when { expression { env.BUILD_IMAGES?.trim() && env.PUBLISH_IMAGES == 'true' } }
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-write',
+          usernameVariable: 'DH_USER', passwordVariable: 'DH_TOKEN')]) {
+          sh '''
+            set -eu
+            set +x
+            export DOCKER_CONFIG="$(mktemp -d)"
+            trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+            printf '%s' "$DH_TOKEN" | docker login docker.io -u "$DH_USER" --password-stdin
+            for NAME in $BUILD_IMAGES; do
+              docker push "$REGISTRY/$NAME:$IMAGE_TAG"
+              docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$REGISTRY/$NAME:dev"
+              docker push "$REGISTRY/$NAME:dev"
+            done
+            docker logout docker.io
+            '''
+        }
+      }
+    }
+  }
+  post {
+    always {
+      dir(env.APP_ROOT) {
+        sh 'rm -rf .ci-venv || true'
+      }
+    }
+    success {
+      echo 'CI completed: ' + (env.BUILD_IMAGES ?: '(no image changes)') + ' : ' + env.IMAGE_TAG
+      echo 'Image publication is restricted to ' + env.PUBLISH_BRANCH + '; current branch=' + env.CHECKOUT_BRANCH
+    }
+  }
+}
