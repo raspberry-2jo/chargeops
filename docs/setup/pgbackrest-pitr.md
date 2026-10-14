@@ -94,5 +94,5 @@ RTO(복원 시작 → T 까지 재생 · 승격) = 15초                        
 
 ## 6. 팀에서 정할 것
 
-- 전체 백업 주기 · 보관 수: 지금은 손으로 받고 `retention-full=2`. 예) 주 1회 전체 + 매일 차등(`--type=diff`)을 mgmt 타이머나 K8s CronJob으로 — 4.5 DR 훈련(RTO 30분 이내) 전에 정함
-- 운영 저장소: 실습 MinIO 그대로 / AWS S3(`S3_BUCKET_BACKUP`, 2.2 IAM 권한 필요)
+- ~~전체 백업 주기~~ → **정함 (2026-10-14)**: 두 DB 서버의 systemd 타이머가 매일 03:40, 일요일 전체 · 다른 날 차등, Primary 에서만, 저장소마다 — [`aws-s3-backup.md`](aws-s3-backup.md) 2-6. 보관 수는 그대로 `retention-full=2`
+- ~~운영 저장소~~ → **둘 다 (2026-10-14)**: repo1 MinIO(빠른 복구) 유지 + repo2 AWS S3(원격 · DR) 추가 — [`aws-s3-backup.md`](aws-s3-backup.md). 지금은 개인 계정 시험, 팀 계정은 2.2 IAM 뒤 같은 절차

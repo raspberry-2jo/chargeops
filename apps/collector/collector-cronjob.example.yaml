@@ -3,7 +3,8 @@
 #   설치 순서 · 비밀값 넣는 법 · 확인: docs/setup/public-api-collector.md
 #   <...> 자리를 채운 사본으로 적용 (관리 서버):  kubectl apply -f collector-cronjob.yaml
 #     <db-01 IP>,<db-02 IP>  파드는 노드의 /etc/hosts 를 못 봐서 이름 대신 IP (PgBouncer 2대, 6432)
-#     <S3 주소>             MinIO(실습) 주소. AWS S3 를 쓰면 S3_ENDPOINT_URL 줄을 지움
+#     <S3 주소>             MinIO(실습) 주소. AWS S3 를 쓰면 S3_ENDPOINT_URL · AWS_CA_BUNDLE 두 줄을 지우고
+#                           AWS_REGION: "ap-northeast-2" 를 넣는다 (빈 값으로 두면 안 됨 — docs/setup/aws-s3-backup.md 2-4)
 #   비밀값(인증키 · DB 비밀번호 · S3 키)은 이 파일에 쓰지 않는다 → Secret collector-secret (문서 2장)
 #   ⚠ CronJob 은 suspend: true 로 시작. 이미 켠 뒤에 이 파일을 다시 apply 하면 수집이 조용히 멈춘다 → 값만 바꿀 땐 kubectl patch
 #   ⚠ 수집은 한 군데에서만 (같은 인증키로 두 곳에서 돌리면 하루 1,000회 한도를 나눠 씀)

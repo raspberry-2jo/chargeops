@@ -79,6 +79,7 @@ kubectl -n ops patch cronjob collector-info -p '{"spec":{"suspend":false}}'
 - 비밀값은 Secret `collector-secret` 에만: `PGPASSWORD`(app_writer) · `EV_SERVICE_KEY` · `AWS_ACCESS_KEY_ID` · `AWS_SECRET_ACCESS_KEY` = `<각자 설정>`
 - 환경변수 이름: 저장소판은 `.env.example` 이름(`PUBLIC_API_KEY` · `DB_*` · `S3_BUCKET_RAW`)을 먼저 읽고, 비어 있으면 실습 때 이름(`EV_SERVICE_KEY` · `PG*` · `S3_BUCKET`)을 읽는다 → 위 Secret 그대로 동작
 - 수집 범위는 ConfigMap 의 `EV_ZCODE: "50"`(제주, 2026-10-12 결정). 빈 값이면 전국(기본정보만 약 53회 호출 → 한도 주의)
+- 원본을 **AWS S3** 로 보내려면 ConfigMap · Secret 만 바꾼다 (Secret 먼저): [`aws-s3-backup.md`](aws-s3-backup.md) 2-4
 
 ## 4. 확인 방법
 
@@ -118,10 +119,13 @@ psql -h db-01 -U dba chargeops -f ~/chargeops/apps/collector/check_queries.sql  
 
 ## 5. 막혔던 점
 
-1. **수집이 빠진 두 구간 (10-13 10:35~11:00 · 18:40~19:35)** — 수집기 문제가 아니라 실습 VM 이 멈춰 있던 시간(재시작 · PC 절전).
-   그 회차들은 `collect_log` 에도, K8s 의 실패 Job 목록(`failedJobsHistoryLimit: 5`)에도 없다 → CronJob 이 Job 자체를 만들지 못했다는 뜻.
-   `startingDeadlineSeconds: 120` 이라 2분 넘게 늦은 회차는 나중에 몰아서 돌지 않는다 (다시 켰을 때 호출이 한꺼번에 몰리지 않게 일부러 둔 값).
-   10-13 11:00 회차는 Job 이 떴지만 DB 가 아직 안 올라와 `DB 접속 실패: connection timeout expired` 로 끝났다 — DB 에 못 붙으면 기록을 못 남기므로 `kubectl -n ops logs` 로만 보인다
+1. **수집이 빠진 두 구간 (10-13 10:35~11:00 · 18:40~19:35)** — 수집기 문제가 아니라 실습 VM 이 멈춰 있던 시간(재시작 · PC 절전)과 그 직후.
+   - 멈춰 있던 동안의 회차는 `collect_log` 에도, K8s 실패 Job 목록에도 없다 → CronJob 이 Job 자체를 만들지 못함.
+     `startingDeadlineSeconds: 120` 이라 2분 넘게 늦은 회차는 나중에 몰아서 돌지 않는다 (다시 켰을 때 호출이 한꺼번에 몰리지 않게 일부러 둔 값)
+   - **다시 켠 직후 회차**(10-13 11:00 · 19:35)는 Job 은 떴지만 `DB 접속 실패: connection timeout expired` 로 끝났다.
+     원인: VM 을 켤 때 실습망 NIC 가 기본 방화벽 존으로 돌아가 DB(6432)가 막힘 → 방화벽 설정을 다시 적용하기 전까지 실패.
+     DB 에 못 붙으면 기록을 못 남기므로 `kubectl -n ops logs` 로만 보인다 (2026-10-14 바로잡음 — 처음엔 "Job 도 없었다"로 적었음)
+   - 켠 뒤에는 방화벽 존을 다시 붙이는 점검(팀 구축 가이드 4.2 `after-up.sh`)을 먼저 — 인프라 쪽 자동 고정 전까지
 2. **실패 2회 = 공공 API 접속 실패** (`ConnectTimeout`, 수집기 안에서 3번 시도 뒤 포기). 19:40 은 멈췄던 환경이 다시 돈 첫 회차, 22:55 는 일시적.
    둘 다 호출 0회 · 적재 0건으로 기록되고(한 회차 = 한 트랜잭션) 다음 회차는 정상
 3. **빈 구간을 메울 수 있는 한도** — 상태 API 는 최근 10분 변경까지만 준다. 그래서 실패 1~2회(10분 안)는 다음 회차가 조회 범위를 넓혀 메우지만,
