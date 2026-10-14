@@ -1,0 +1,183 @@
+# ============================================================================
+# 공공 API 수집기 — 쿠버네티스 CronJob 3개 (WBS 3.6). 실습 환경에서 실제로 돌리는 매니페스트에서 주소만 비운 양식
+#   설치 순서 · 비밀값 넣는 법 · 확인: docs/setup/public-api-collector.md
+#   <...> 자리를 채운 사본으로 적용 (관리 서버):  kubectl apply -f collector-cronjob.yaml
+#     <db-01 IP>,<db-02 IP>  파드는 노드의 /etc/hosts 를 못 봐서 이름 대신 IP (PgBouncer 2대, 6432)
+#     <S3 주소>             MinIO(실습) 주소. AWS S3 를 쓰면 S3_ENDPOINT_URL · AWS_CA_BUNDLE 두 줄을 지우고
+#                           AWS_REGION: "ap-northeast-2" 를 넣는다 (빈 값으로 두면 안 됨 — docs/setup/aws-s3-backup.md 2-4)
+#   비밀값(인증키 · DB 비밀번호 · S3 키)은 이 파일에 쓰지 않는다 → Secret collector-secret (문서 2장)
+#   ⚠ CronJob 은 suspend: true 로 시작. 이미 켠 뒤에 이 파일을 다시 apply 하면 수집이 조용히 멈춘다 → 값만 바꿀 땐 kubectl patch
+#   ⚠ 수집은 한 군데에서만 (같은 인증키로 두 곳에서 돌리면 하루 1,000회 한도를 나눠 씀)
+# ============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ops
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: collector-config
+  namespace: ops
+data:
+  PGHOST: "<db-01 IP>,<db-02 IP>"     # db-01 · db-02 의 PgBouncer (파드는 노드의 /etc/hosts 를 못 봐서 IP)
+  PGPORT: "6432"
+  PGTARGETSESSIONATTRS: "read-write"  # 두 주소 중 쓰기 되는 쪽(Primary)만 → 장애 전환 때 이 값을 바꾸지 않는다 (가이드 9.3 · 9.4)
+  PGDATABASE: "chargeops"
+  PGUSER: "app_writer"             # 쓰기 계정 (테이블 쓰기 · 적재 대기 비우기 · 함수 실행만)
+  PGCONNECT_TIMEOUT: "3"           # 꺼진 서버를 3초만 기다리고 다음 주소로 (10 이면 장애 중 회차마다 10초씩)
+  RAW_DIR: "/data"
+  EV_ZCODE: "50"                   # 제주 (2026-10-12 결정). 전국은 ""
+  S3_BUCKET: "chargeops-raw"       # 원본을 MinIO 로. 비우면 PVC(/data)에 저장
+  S3_ENDPOINT_URL: "https://<S3 주소>"       # 실습은 MinIO (관리 서버 별칭, 443)
+  AWS_CA_BUNDLE: "/etc/chargeops-ca/ca.crt"  # 사설 CA 로 MinIO 인증서 검증
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: collector-raw
+  namespace: ops
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path     # local-path-provisioner (S3 를 안 쓸 때 원본을 두는 곳)
+  resources:
+    requests:
+      storage: 5Gi
+---
+# 상태 변경분 (5분마다)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: collector-status
+  namespace: ops
+  labels: { app: collector }
+spec:
+  schedule: "*/5 * * * *"
+  timeZone: "Asia/Seoul"             # 데이터팀 임시 환경은 UTC 였음("10 18 * * *") → 최종은 한국 시간으로 명시
+  suspend: true                      # 처음에는 멈춘 상태. 손으로 한 번씩 돌려 본 뒤 켠다
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0                # 재시도는 수집기가 안에서 (3초 · 10초). 밖에서 또 하면 호출 수만 늘어남
+      activeDeadlineSeconds: 240
+      template:
+        metadata:
+          labels: { app: collector, mode: status }
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: k8s-w02
+          containers:
+            - name: collector
+              image: registry.chargeops.lab:5000/chargeops/collector:0.1
+              imagePullPolicy: IfNotPresent
+              args: ["status"]
+              envFrom:
+                - configMapRef: { name: collector-config }
+                - secretRef: { name: collector-secret }
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 512Mi }
+              volumeMounts:
+                - { name: raw, mountPath: /data }
+                - { name: ca, mountPath: /etc/chargeops-ca, readOnly: true }
+          volumes:
+            - name: raw
+              persistentVolumeClaim: { claimName: collector-raw }
+            - name: ca
+              configMap: { name: chargeops-ca }
+---
+# 기본정보 (하루 1회, 한국 시간 03:10 — timeZone 지정)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: collector-info
+  namespace: ops
+  labels: { app: collector }
+spec:
+  schedule: "10 3 * * *"
+  timeZone: "Asia/Seoul"             # 데이터팀 임시 환경은 UTC 였음("10 18 * * *") → 최종은 한국 시간으로 명시
+  suspend: true                      # 처음에는 멈춘 상태. 손으로 한 번씩 돌려 본 뒤 켠다
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0                # 재시도는 수집기가 안에서 (3초 · 10초). 밖에서 또 하면 호출 수만 늘어남
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels: { app: collector, mode: info }
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: k8s-w02
+          containers:
+            - name: collector
+              image: registry.chargeops.lab:5000/chargeops/collector:0.1
+              imagePullPolicy: IfNotPresent
+              args: ["info"]
+              envFrom:
+                - configMapRef: { name: collector-config }
+                - secretRef: { name: collector-secret }
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 512Mi }
+              volumeMounts:
+                - { name: raw, mountPath: /data }
+                - { name: ca, mountPath: /etc/chargeops-ca, readOnly: true }
+          volumes:
+            - name: raw
+              persistentVolumeClaim: { claimName: collector-raw }
+            - name: ca
+              configMap: { name: chargeops-ca }
+---
+# 건수 확인 (일정으로 돌지 않게 suspend, 손으로만 create job)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: collector-check
+  namespace: ops
+  labels: { app: collector }
+spec:
+  schedule: "0 0 1 1 *"
+  timeZone: "Asia/Seoul"             # 데이터팀 임시 환경은 UTC 였음("10 18 * * *") → 최종은 한국 시간으로 명시
+  suspend: true                      # 처음에는 멈춘 상태. 손으로 한 번씩 돌려 본 뒤 켠다
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0                # 재시도는 수집기가 안에서 (3초 · 10초). 밖에서 또 하면 호출 수만 늘어남
+      activeDeadlineSeconds: 120
+      template:
+        metadata:
+          labels: { app: collector, mode: check }
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: k8s-w02
+          containers:
+            - name: collector
+              image: registry.chargeops.lab:5000/chargeops/collector:0.1
+              imagePullPolicy: IfNotPresent
+              args: ["check"]
+              envFrom:
+                - configMapRef: { name: collector-config }
+                - secretRef: { name: collector-secret }
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 512Mi }
+              volumeMounts:
+                - { name: raw, mountPath: /data }
+                - { name: ca, mountPath: /etc/chargeops-ca, readOnly: true }
+          volumes:
+            - name: raw
+              persistentVolumeClaim: { claimName: collector-raw }
+            - name: ca
+              configMap: { name: chargeops-ca }

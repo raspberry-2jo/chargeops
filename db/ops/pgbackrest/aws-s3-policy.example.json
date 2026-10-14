@@ -1,0 +1,31 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BackupListRepoRoot",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::<백업 버킷>"],
+      "Condition": { "StringEquals": { "s3:prefix": ["", "test-chargeops"], "s3:delimiter": ["/"] } }
+    },
+    {
+      "Sid": "BackupListRepo",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::<백업 버킷>"],
+      "Condition": { "StringLike": { "s3:prefix": ["test-chargeops/*"] } }
+    },
+    {
+      "Sid": "BackupObjects",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:PutObjectTagging", "s3:GetObject", "s3:GetObjectVersion", "s3:DeleteObject"],
+      "Resource": ["arn:aws:s3:::<백업 버킷>/test-chargeops/*"]
+    },
+    {
+      "Sid": "CollectorRawPutOnly",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject"],
+      "Resource": ["arn:aws:s3:::<원본 버킷>/*"]
+    }
+  ]
+}
