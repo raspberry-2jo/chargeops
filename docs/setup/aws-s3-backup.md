@@ -3,7 +3,7 @@
 - 담당: 강영수
 - 관련 WBS: 2.8 후속(원격 보관) · 3.6 원본 S3 보관 · 4.5 DR 훈련 준비
 - 버전: versions.md 참고 (pgBackRest 2.59, PostgreSQL 17)
-- 상태: **개인 AWS 계정으로 시험 완료 (2026-10-14)** — 설치 · 복원 훈련(RTO 54초) · AWS 장애 감지 시험(경보 1~2분). 팀 계정은 2.2 의 IAM 을 받은 뒤 같은 절차로 버킷 이름 · 키 · 경로만 바꾼다 (6장)
+- 상태: **개인 AWS 계정으로 시험 완료 (2026-10-14)** — 설치 · 복원 훈련(RTO 54초) · AWS 장애 감지 시험(경보 1분 안) · 빈 서버 DR 복원([`dr-restore.md`](dr-restore.md)). 팀 계정은 2.2 의 IAM 을 받은 뒤 같은 절차로 버킷 이름 · 키 · 경로만 바꾼다 (6장)
 - 앞 단계: [`pgbackrest-pitr.md`](pgbackrest-pitr.md) (repo1 = 실습 MinIO), [`public-api-collector.md`](public-api-collector.md)
 
 ## 1. 왜 / 무엇을
@@ -197,10 +197,11 @@ RTO                  54초 (복원 시작 → T 까지 재생 · 승격) — 내
                      → MinIO 는 멀쩡한데도 보관이 통째로 멈춤. 다 쓴 WAL 5개(16MB × 5 = 80MB)가 db-01 디스크(pg_wal)에서 대기
 경보                 Alertmanager: WalArchiveFailing  P-04 sev2 active "WAL 아카이브 2회 이상 실패"
                      Grafana 통합 대시보드: 맨 위 '백업 · WAL 보관' 6분(노랑) · '조치 필요' 표에 '높음' 한 줄 (경과 4분 25초)
-                     → 마지막 정상 보관(6분 전)에서 1~2분 안에 경보
+                     장애 기록(v_ops_incidents): 13:30:18 발생 → 13:51:18 해소 — 막은 직후 1분 안에 경보
+알림 전송           메일 ✅ · Slack ❌ — 이 실습 PC 에는 Slack 토큰을 넣지 않았음(팀 구축 가이드 STEP 22, PC 마다 각자). DB 쪽 감지와는 무관
 되돌리고 90초         failed_count 29 에서 멈춤 · 마지막 보관 …1500000007 · 지금 WAL …1500000008 → 밀린 WAL 을 저절로 따라잡음
 check                …1500000008 successfully archived to … on repo1 / … on repo2 (562ms)
-Grafana              '백업 · WAL 보관' 21초(초록). 경보는 규칙이 '15분 동안의 실패 수'를 봐서 마지막 실패 약 15분 뒤 저절로 풀림
+Grafana              '백업 · WAL 보관' 21초(초록). 경보는 규칙이 '15분 동안의 실패 수'를 봐서 마지막 실패 약 15분 뒤(13:51:18) 저절로 풀림
 ```
 
 | 복원 훈련 | 저장소 | 복원(내려받기) | RTO |
@@ -236,14 +237,14 @@ AWS 콘솔에서 보이는 곳:
 | `pg_stat_archiver.failed_count` 가 8 늘어남 | repo2 설정 파일을 놓은 뒤 `stanza-create` 전 몇 초 동안 `archive-push` 가 repo2 에서 실패 → 설정을 놓으면 **바로** stanza-create. 그 뒤로는 증가 없음 |
 | `psql: … port 6432 failed: FATAL: login rejected` | `source ~/.chargeops.env` 뒤 기본 포트가 6432(PgBouncer, 앱 전용)라 dba 가 거부됨 → `-p 5432` |
 | AWS 백업으로 복원 훈련이 안 됨 (예방) | 저장소를 지정하지 않은 restore 는 repo1 부터 찾는다(공식 문서) → `PITR_REPO=2 bash db/ops/pgbackrest/pitr-drill.sh` |
-| ⚠ AWS 에 못 올리면 MinIO 보관까지 멈춤 — **실측 (4장 장애 감지 시험)** | 저장소가 여럿이면 `archive-push` 는 전부에 올려야 성공 — 비동기(`archive-async`)가 아니면 한 곳이 막힐 때 다른 곳도 한 칸 이상 못 나간다(공식 문서). 시험에서 `last_archived_wal` 이 7분 동안 그대로, WAL 5개 이상이 pg_wal 에 쌓임. 감지는 경보 P-04(1~2분) · Grafana "WAL 보관". 이 지표(postgres_exporter)가 실습 PC 에 없어 2026-10-14 에 설치함(팀 구축 가이드 STEP 19 ②) — **설치 전에는 이 경보가 울릴 수 없었음** |
+| ⚠ AWS 에 못 올리면 MinIO 보관까지 멈춤 — **실측 (4장 장애 감지 시험)** | 저장소가 여럿이면 `archive-push` 는 전부에 올려야 성공 — 비동기(`archive-async`)가 아니면 한 곳이 막힐 때 다른 곳도 한 칸 이상 못 나간다(공식 문서). 시험에서 `last_archived_wal` 이 7분 동안 그대로, WAL 5개 이상이 pg_wal 에 쌓임. 감지는 경보 P-04(1분 안) · Grafana "WAL 보관". 이 지표(postgres_exporter)가 실습 PC 에 없어 2026-10-14 에 설치함(팀 구축 가이드 STEP 19 ②) — **설치 전에는 이 경보가 울릴 수 없었음** |
 | 차등 백업이 생각보다 큼 (361MB, 전체 1시간 뒤) | pgBackRest 기본은 **파일 단위** — 수집으로 매 5분 바뀌는 큰 테이블 파일은 통째로 다시 올라간다. 압축 후 크기는 작지만, 줄이려면 블록 단위(`repo2-block=y` + `repo2-bundle=y`)를 검토 (6장) |
 | 결제 화면에서 리전이 모두 자물쇠 | 결제는 리전 없는 서비스라 잠김(정상). 버킷 만들 때는 S3 화면에서 **서울**인지 확인 |
 
 ## 6. 팀에서 정할 것 · 다음
 
 - **팀 계정으로 옮기기 (2.2 IAM 담당과)**: 팀 계정의 기존 DB 백업 버킷을 쓰고, `aws-s3-policy.example.json` 그대로 정책 · 프로그램용 사용자 · 키를 요청. 실습 VM 은 `test-chargeops`, 정식 환경은 다른 경로(예: `chargeops`) — 백업 저장소는 DB 클러스터마다 고유 번호에 묶여 새로 설치한 DB 가 같은 경로를 못 이어 쓴다
-- ~~AWS 저장소 복원 훈련 · RTO~~ → **완료 (2026-10-14)**: RTO 54초 (4장). 다음은 EC2 DR(4.5, Terraform) — 새 서버에 PostgreSQL 17 + pgBackRest 를 놓고 같은 repo2 에서 복원
+- ~~AWS 저장소 복원 훈련 · RTO~~ → **완료 (2026-10-14)**: RTO 54초 (4장). 이어서 **빈 서버 DR 복원 실습 완료 (2026-10-14)**: 패키지 설치부터 63초 + 54초 → [`dr-restore.md`](dr-restore.md). 남은 것은 EC2 에서 같은 스크립트로(4.5, Terraform)
 - RTO 를 더 줄이려면: WAL 미리 받기(`archive-async=y` + `archive-get-queue-max`) · 복원 병렬(`--process-max`) 검토
 - AWS 장애가 길어질 때 (4장 장애 감지 시험: 지금은 보관 전체가 멈추고 pg_wal 이 1분에 16MB 이상 늘어남) — 고를 수 있는 것:
   - 그대로: 경보 P-04 를 받으면 사람이 원인(키 · 네트워크 · 버킷)을 고친다. 하루 안에 고치면 디스크 여유로 버팀
