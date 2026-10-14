@@ -9,17 +9,22 @@
 #   전제: 전체 백업이 하나 이상 있음(pgbackrest info) · mgmt 의 ~/.pgpass 에 app_writer(6432) 줄 ·
 #         mgmt → 복원 서버 SSH(sudo) · 복원 서버에 /etc/pgbackrest/pgbackrest.conf
 #   바꿀 수 있는 값: RESTORE_HOST(기본 db-02) · PITR_PORT(기본 5433) · DB_HOSTS(기본 db-01,db-02)
+#                    PITR_REPO(비우면 pgBackRest 기본 = repo1 부터 찾음. AWS 원격 저장소로 복원 훈련은 PITR_REPO=2)
 # ============================================================================
 set -euo pipefail
 RESTORE_HOST=${RESTORE_HOST:-db-02}
 PITR_PORT=${PITR_PORT:-5433}
 DB_HOSTS=${DB_HOSTS:-db-01,db-02}
+PITR_REPO=${PITR_REPO:-}
+case "$PITR_REPO" in ""|[1-9]) ;; *) echo "PITR_REPO 는 저장소 번호(예: 2)"; exit 1;; esac
+REPO_OPT=${PITR_REPO:+--repo=$PITR_REPO}                                 # 비면 아무것도 안 붙음
+REPO_TXT=${PITR_REPO:+repo$PITR_REPO}; REPO_TXT=${REPO_TXT:-기본(repo1 부터)}
 APP="host=$DB_HOSTS port=6432 dbname=chargeops user=app_writer target_session_attrs=read-write connect_timeout=3"   # 앱과 같은 길 (지금 Primary 쪽)
 DIR=/var/lib/pgsql/17/pitr; PG=/usr/pgsql-17/bin
 case "$DIR" in */17/data|*/17/data/) echo "복원 폴더가 운영 데이터 폴더와 같음 — 중단"; exit 1;; esac
 [ "$PITR_PORT" != 5432 ] || { echo "PITR_PORT 가 5432(운영)와 같음 — 중단"; exit 1; }
 
-echo "$RESTORE_HOST 의 $DIR 을 지우고 포트 $PITR_PORT 에 복원합니다. 운영 DB(5432)는 그대로입니다."
+echo "$RESTORE_HOST 의 $DIR 을 지우고 포트 $PITR_PORT 에 복원합니다(저장소: $REPO_TXT). 운영 DB(5432)는 그대로입니다."
 read -rp "계속하려면 yes: " ok; [ "$ok" = yes ] || { echo "취소"; exit 0; }
 
 mark() { psql "$APP" -w -XAtc "INSERT INTO action_audit (idempotency_key, step, requested_by, result, reason)
@@ -35,7 +40,7 @@ T0=$(date +%s)
 echo "③ $RESTORE_HOST 의 $DIR 에 T 시점으로 복원 (포트 $PITR_PORT)"
 ssh "$RESTORE_HOST" "sudo -u postgres $PG/pg_ctl -D $DIR stop -m fast 2>/dev/null || true; sudo rm -rf $DIR && sudo install -d -o postgres -g postgres -m 700 $DIR"
 ssh "$RESTORE_HOST" "sudo -u postgres pgbackrest --stanza=chargeops --pg1-path=$DIR --type=time --target='$T' \
-  --target-action=promote --archive-mode=off restore"          # archive-mode=off: 복원본이 WAL 을 저장소에 올리지 않게
+  --target-action=promote --archive-mode=off $REPO_OPT restore"          # archive-mode=off: 복원본이 WAL 을 저장소에 올리지 않게
 # 복원본은 Standby 가 아님: standby.signal 과 복제 접속 정보(zz-standby.conf, 재편입 뒤 생김)를 지워 운영 Primary 에 붙지 않게.
 # 서버별 메모리 덮어쓰기(zz-local.conf)도 뺀다 (백업을 받은 서버의 값이 따라올 수 있음)
 ssh "$RESTORE_HOST" "sudo -u postgres bash -c \"echo 'port = $PITR_PORT' >> $DIR/postgresql.auto.conf; rm -f $DIR/standby.signal $DIR/conf.d/zz-standby.conf $DIR/conf.d/zz-local.conf\""

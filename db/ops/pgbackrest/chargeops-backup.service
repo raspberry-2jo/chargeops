@@ -1,0 +1,11 @@
+# /etc/systemd/system/chargeops-backup.service — pgBackRest 정기 백업 1회 (타이머가 부름, 손으로: systemctl start)
+[Unit]
+Description=ChargeOps pgBackRest scheduled backup (Primary only)
+After=postgresql-17.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/chargeops-backup.sh
+Nice=10
+IOSchedulingClass=idle
