@@ -20,7 +20,8 @@
 | CI/CD | Jenkins | 미정 | | |
 | IaC | Vagrant | 미정 | | |
 | IaC | Ansible | 미정 | | |
-| IaC | Terraform | 미정 | | |
+| IaC | Terraform | 1.16.x (DR 실습 1.16.6 — 인프라 확정 전 제안) | 강영수 | 2026-10-15 |
+| IaC | Terraform AWS provider | 6.x (DR 실습 6.69.0) · archive 2.x (2.8.1) | 강영수 | 2026-10-15 |
 | 엣지 | WireGuard | 미정 | | |
 | 엣지 | PlatformIO (ESP32) | 미정 | | |
 
