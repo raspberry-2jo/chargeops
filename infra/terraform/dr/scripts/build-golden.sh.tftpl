@@ -1,0 +1,21 @@
+#!/bin/bash
+# 골든 이미지 만들기 (임시 서버의 첫 부팅에서 한 번) — dr-restore.sh ① 의 패키지를 미리 깔아 DR 때 설치 시간(실측 54초)을 없앤다
+#   DR VPC 의 프라이빗 서브넷은 인터넷이 없어서(S3 만) 여기서 미리 깔아 두지 않으면 복원 자체가 안 된다
+set -euxo pipefail
+exec > /var/log/chargeops-golden.log 2>&1
+dnf install -y dnf-plugins-core epel-release
+dnf config-manager --set-enabled crb
+dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+dnf -qy module disable postgresql
+dnf install -y postgresql17-server postgresql17-contrib pgvector_17 pg_cron_17 pgaudit_17 'pgbackrest-2.59*'
+# SSM 에이전트 (Rocky 공식 이미지에는 없음) — 들어오는 포트 0 으로 접속하는 길
+dnf install -y https://s3.${region}.amazonaws.com/amazon-ssm-${region}/latest/linux_amd64/amazon-ssm-agent.rpm
+systemctl enable amazon-ssm-agent
+curl -fsSL -o /usr/local/sbin/dr-restore.sh "${dr_restore_url}"
+chmod 755 /usr/local/sbin/dr-restore.sh
+/usr/pgsql-17/bin/postgres --version > /etc/chargeops-golden
+pgbackrest version >> /etc/chargeops-golden
+date -Is >> /etc/chargeops-golden
+dnf clean all
+cloud-init clean --logs || true   # 이 이미지로 띄운 서버에서 user_data 가 다시 돌게
+shutdown -h now                   # 꺼짐 = 준비 끝 (instance_initiated_shutdown_behavior = stop)

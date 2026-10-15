@@ -1,0 +1,3 @@
+# cp terraform.tfvars.example terraform.tfvars  → 값 넣기 (terraform.tfvars 는 git 에 안 올라감)
+backup_bucket = "<백업 버킷>"      # 영수 개인 계정 시험 = pgBackRest repo2 버킷
+repo_path     = "/test-chargeops" # 팀 계정이면 "/chargeops"
