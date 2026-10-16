@@ -1,0 +1,84 @@
+# /etc/patroni/patroni.yml — ansible/patroni.yml 이 만든다 (직접 고치지 말 것. 바꿀 값은 group_vars/all/main.yml 의 ha:)
+#   600 postgres. 비밀번호는 mgmt 의 ~/.pgpass 에서 왔다 — 이 파일을 화면에 출력하지 않는다
+scope: {{ ha.scope }}
+namespace: /service/
+name: {{ inventory_hostname }}
+
+restapi:
+  listen: {{ ansible_host }}:8008
+  connect_address: {{ ansible_host }}:8008
+
+etcd3:
+  hosts: {{ etcd_hosts }}
+
+# 클러스터 전체 값 — 처음 한 번만 etcd 에 들어간다. 그 뒤 바꾸려면 patronictl edit-config (문서 5장)
+bootstrap:
+  dcs:
+    ttl: {{ ha.ttl }}
+    loop_wait: {{ ha.loop_wait }}
+    retry_timeout: {{ ha.retry_timeout }}
+    maximum_lag_on_failover: {{ ha.maximum_lag_on_failover }}
+    # 수동 시절 슬롯(db01 · db02)을 Patroni 가 지우지 않게 — 전환 중 Standby 가 붙기 전까지 WAL 을 지킨다. convert.sh ⑦ 이 정리
+    ignore_slots:
+      - { name: db01, type: physical }
+      - { name: db02, type: physical }
+    postgresql:
+      use_pg_rewind: true           # 옛 Primary 를 전체 복사 없이 되감아 Standby 로 (rejoin.sh 가 하던 일)
+      use_slots: true               # 복제 슬롯을 Patroni 가 관리 (이름 = 구성원 이름, 예: db_02)
+      parameters:
+        # 아래는 Patroni 가 postgresql.conf 의 맨 뒤에 쓰는 값이라 conf.d/chargeops.conf 보다 우선한다
+        # → chargeops.conf 와 같은 값으로 맞춘다 (안 쓰면 Patroni 기본값 wal_keep_size 128MB · max_wal_senders 10 이 들어감)
+        max_connections: 100
+        max_wal_senders: 5
+        max_replication_slots: 5
+        wal_level: replica
+        hot_standby: "on"
+        wal_log_hints: "on"
+        wal_keep_size: 512MB
+        max_worker_processes: 8
+        # Standby 가 오래 꺼져 슬롯이 끊겼을 때 S3 의 WAL 로 따라잡게
+        restore_command: pgbackrest --stanza=chargeops archive-get %f "%p"
+
+postgresql:
+  listen: {{ ansible_host }},127.0.0.1:5432
+  connect_address: {{ ansible_host }}:5432
+  data_dir: /var/lib/pgsql/17/data
+  bin_dir: /usr/pgsql-17/bin
+  # 원래 postgresql.conf 는 Patroni 가 처음 시작할 때 postgresql.base.conf 로 이름을 바꿔 그대로 읽는다
+  #   → include_dir 'conf.d' (chargeops.conf · zz-local.conf) 와 pg_hba.conf 는 지금 것 그대로
+  pgpass: /var/lib/pgsql/.pgpass_patroni     # rejoin.sh 가 쓰던 /var/lib/pgsql/.pgpass 와 겹치지 않게
+  authentication:
+    superuser:
+      username: postgres
+      password: {{ pg_super_pw | to_json }}
+    replication:
+      username: replicator
+      password: {{ pg_repl_pw | to_json }}
+    rewind:
+      username: postgres
+      password: {{ pg_super_pw | to_json }}
+  # Patroni 자신(postgres 계정)은 소켓으로 접속 → pg_hba 첫 줄 'local all postgres peer' (비밀번호 없이).
+  #   TCP 로 두면 localhost(127.0.0.1)로 붙는데, 지금 pg_hba 는 127.0.0.1 의 postgres 를 거부한다 (맨 끝 reject 줄)
+  use_unix_socket: true
+  parameters:
+    unix_socket_directories: /run/postgresql, /tmp     # PGDG 기본값과 같게 (pgBackRest · psql 이 쓰는 경로 유지)
+  callbacks:   # PgBouncer 를 PostgreSQL 상태에 맞춤 (내려가면 stop, 역할이 정해지면 restart) — db/ops/patroni/patroni-on-role-change.sh
+    on_start: /usr/local/sbin/patroni-on-role-change.sh
+    on_stop: /usr/local/sbin/patroni-on-role-change.sh
+    on_role_change: /usr/local/sbin/patroni-on-role-change.sh
+  create_replica_methods: [basebackup]
+  basebackup:
+    checkpoint: fast
+
+# Patroni 가 멈추면(죽음 · 멈춤) watchdog 이 ttl - safety_margin 초 뒤 서버를 재부팅 → 옛 Primary 가 쓰기를 계속 받지 못함
+#   required = watchdog 을 못 열면 Leader 가 되는 것 자체를 거부 (2026-10-16 시험: 없을 때 Primary 두 대 · 279건 손실)
+watchdog:
+  mode: required
+  device: /dev/watchdog
+  safety_margin: {{ ha.watchdog_safety_margin }}
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

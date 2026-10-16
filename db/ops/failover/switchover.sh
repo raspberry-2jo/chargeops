@@ -10,6 +10,18 @@
 #   변수: OLD = 지금 Primary(기본 db-02), NEW = 승격할 Standby(기본 db-01), DB_HOSTS = 앱 주소 목록(기본 db-01,db-02)
 # ============================================================================
 set -uo pipefail
+# (2026-10-16) Patroni 가 DB 를 관리하게 바꿨으면 이 스크립트는 쓰지 않는다 — 둘이 동시에 손대면 Primary 가 둘이 될 수 있다
+#   한 대라도 patroni 가 enabled 면 중단. 두 대 모두 접속이 안 되면 판단할 수 없으므로 중단
+_seen=0
+for _h in db-01 db-02; do
+  _e=$(ssh -n -o ConnectTimeout=5 -o BatchMode=yes "$_h" 'systemctl is-enabled patroni 2>/dev/null || true' 2>/dev/null) || continue
+  _seen=1
+  if [ "$_e" = enabled ]; then
+    echo "중단 — $_h 에 Patroni 가 설치 · 사용 중(enabled). 상태: bash db/ops/patroni/status.sh · 역할 교대: TO=… bash db/ops/patroni/switchover.sh"
+    echo "       (장애 전환은 Patroni 가 자동으로 한다. 예전 방식으로 돌아가려면 bash db/ops/patroni/rollback.sh)"; exit 1
+  fi
+done
+[ "$_seen" = 1 ] || { echo "중단 — db-01 · db-02 모두 접속 안 됨 (Patroni 사용 여부를 확인할 수 없음)"; exit 1; }
 OLD=${OLD:-db-02}; NEW=${NEW:-db-01}; PGDATA=/var/lib/pgsql/17/data
 DB_HOSTS=${DB_HOSTS:-db-01,db-02}                                     # 앱 접속 문자열의 주소 목록 (앞이 평소 Primary)
 APP="host=$DB_HOSTS port=6432 dbname=chargeops user=app_writer target_session_attrs=read-write connect_timeout=3"
