@@ -12,9 +12,10 @@ pipeline {
       description: 'Build all nine images. The first build automatically builds all images.')
   }
   environment {
-    REGISTRY = 'chanjookim'
+    HARBOR_HOST = 'harbor.example.com'
+    REGISTRY = 'harbor.example.com/chargeops'
     APP_ROOT = 'infra/app'
-    PUBLISH_BRANCH = 'dev'
+    PUBLISH_BRANCH = 'kim_chanju'
   }
   stages {
     stage('Checkout') {
@@ -49,7 +50,7 @@ pipeline {
             CURRENT_COMMIT="$(git rev-parse HEAD)"
             BASE="${GIT_PREVIOUS_SUCCESSFUL_COMMIT:-}"
             if [ -z "$BASE" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-              printf '%s\\n' '__BUILD_ALL__'
+              printf '%s\n' '__BUILD_ALL__'
             else
               git diff --name-only "$BASE" "$CURRENT_COMMIT" -- "$APP_ROOT/"
             fi
@@ -134,7 +135,7 @@ pipeline {
             CONTEXT="$3"
             case " $BUILD_IMAGES " in
               *" $NAME "*)
-                docker build --pull -f "$DOCKERFILE" \\
+                docker build --pull -f "$DOCKERFILE" \
                   -t "$REGISTRY/$NAME:$IMAGE_TAG" "$CONTEXT"
                 ;;
             esac
@@ -152,23 +153,23 @@ pipeline {
         }
       }
     }
-    stage('Docker Hub Login and Push') {
+    stage('Harbor Login and Push') {
       when { expression { env.BUILD_IMAGES?.trim() && env.PUBLISH_IMAGES == 'true' } }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-write',
-          usernameVariable: 'DH_USER', passwordVariable: 'DH_TOKEN')]) {
+        withCredentials([usernamePassword(credentialsId: 'harbor-push',
+          usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_TOKEN')]) {
           sh '''
             set -eu
             set +x
             export DOCKER_CONFIG="$(mktemp -d)"
-            trap 'rm -rf "$DOCKER_CONFIG"' EXIT
-            printf '%s' "$DH_TOKEN" | docker login docker.io -u "$DH_USER" --password-stdin
+            trap 'docker logout "$HARBOR_HOST" >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
+            printf '%s' "$HARBOR_TOKEN" | docker login "$HARBOR_HOST" -u "$HARBOR_USER" --password-stdin
             for NAME in $BUILD_IMAGES; do
               docker push "$REGISTRY/$NAME:$IMAGE_TAG"
               docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$REGISTRY/$NAME:dev"
               docker push "$REGISTRY/$NAME:dev"
             done
-            docker logout docker.io
+            docker logout "$HARBOR_HOST" >/dev/null 2>&1 || true
             '''
         }
       }
