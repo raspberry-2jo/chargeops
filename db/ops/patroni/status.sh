@@ -21,6 +21,8 @@ echo "   (watchdog 1개 = Leader 가 잡고 있음. Replica 는 0 이 정상. po
 
 echo "== ③ etcd"
 on "$ANY" '/usr/local/bin/etcdctl --endpoints=http://127.0.0.1:2379 endpoint health --cluster 2>&1' | sed 's/^/   /'
+EL=$(on "$ANY" '/usr/local/bin/etcdctl --endpoints=http://127.0.0.1:2379 endpoint status --cluster -w simple 2>/dev/null' | awk -F', ' '$5=="true"{print $1}')
+echo "   etcd 리더: ${EL:-?}  (DB Leader 와 같은 서버면, 그 서버가 통째로 죽을 때 전환이 약 30초 늦어질 수 있음 — 문서 11장)"
 
 echo "== ④ 복제 (Leader 에서)"
 for h in db-01 db-02; do

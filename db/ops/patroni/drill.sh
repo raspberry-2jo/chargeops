@@ -11,6 +11,12 @@
 #   측정: 앱과 같은 길(6432, 두 주소 + read-write)로 0.5초마다 쓰기 확인(txid_current — 표에는 아무것도 쓰지 않음)
 #         + 두 서버에 직접(5432, dba) 'Primary 인가' 를 1초마다 → 같은 순간 Primary 두 대였는지
 #   판정 PASS: 쓰기 받는 서버가 한 번만 바뀌고(옛 서버로 돌아가지 않음) Primary 두 대가 한 번도 없음
+#        PASS (스스로 복구): Replica 승격 없이 옛 Leader 가 다시 쓰기를 받음 + Primary 두 대 0회
+#          kill-all = systemd 재시작 · freeze-patroni = watchdog 재부팅이 확인된 경우만
+#          (2026-10-17 운영 시험: 옛 Leader 가 etcd 리더도 겸하면 etcd 리더 교체 때 Leader 열쇠가 ttl 만큼 연장 →
+#           재부팅된 옛 Leader 가 먼저 돌아와 열쇠를 다시 잡음. 안전하고 데이터 손실 없음 — 문서 11장)
+#   쓰기 멈춘 시간 = 옛 Leader 마지막 쓰기 → 장애 뒤 첫 쓰기(어느 서버든). poweroff 의 '장애 시각' 은 Enter 를 누른 시각이라
+#                   실제보다 몇 초 늦을 수 있어 이 값을 기준으로 본다
 #   기록: ~/patroni-drill-<MODE>-<시각>.log (쓰기) · .roles.log (역할)
 #   재부팅된 서버는 Patroni 가 부팅 때 저절로 떠서 Replica 로 되감겨 붙는다 → 끝나고 bash db/ops/patroni/status.sh
 #   비밀번호: ~/.pgpass 의 app_writer(6432) · dba(5432) 줄
@@ -22,9 +28,17 @@ APP="host=db-01,db-02 port=6432 dbname=chargeops user=app_writer target_session_
 STAMP=$(date +%Y%m%d-%H%M%S); LOG=~/patroni-drill-$MODE-$STAMP.log; RLOG=${LOG%.log}.roles.log
 on() { ssh -n -o ConnectTimeout=5 -o BatchMode=yes "$@"; }
 now() { date +%T.%3N; }
+etcd_leader() {   # etcd 리더 서버 이름 (Leader 열쇠 연장 여부를 읽는 데 씀)
+  local h ip; for h in db-01 db-02; do
+    ip=$(on "$h" '/usr/local/bin/etcdctl --endpoints=http://127.0.0.1:2379 endpoint status --cluster -w simple 2>/dev/null' 2>/dev/null \
+         | awk -F', ' '$5=="true"{sub(/^http:\/\//,"",$1); sub(/:.*/,"",$1); print $1}') && [ -n "$ip" ] && break
+  done
+  for h in db-01 db-02 mgmt; do [ -n "$ip" ] && getent hosts "$h" | grep -qw "$ip" && { echo "$h"; return; }; done   # IP 는 적지 않고 이름으로
+  echo "${ip:-?}"
+}
 die() { echo "중단 — $*"; exit 1; }
 
-case "$MODE" in poweroff|freeze-patroni|kill-all|isolate) ;; *) sed -n 2,18p "$0"; exit 1 ;; esac
+case "$MODE" in poweroff|freeze-patroni|kill-all|isolate) ;; *) awk 'NR>2 && /^# ====/{exit} NR>2' "$0"; exit 1 ;; esac
 if [ "${CO_PROFILE:-}" = server ] && [ "${DRILL_ON_SERVER:-}" != yes ]; then
   die "멘토 서버(CO_PROFILE=server)에서는 DRILL_ON_SERVER=yes 를 붙여야 실행 (빠른 실행표 30 — 사용자 확인 뒤)"
 fi
@@ -43,6 +57,13 @@ WD=$(on "$LEADER" 'sudo find /proc/[0-9]*/fd -lname /dev/watchdog 2>/dev/null | 
 [ "$WD" -ge 1 ] || die "$LEADER 에서 watchdog 을 잡은 프로세스가 없음 — Patroni 설정 확인(watchdog: required)"
 
 echo "대상: Leader = $LEADER → 기대: $REPLICA 가 자동 승격"
+EL=$(etcd_leader)
+if [ "$EL" = "$LEADER" ]; then
+  echo "  etcd 리더: $EL (DB Leader 와 같은 서버) — 서버째 멈추는 시험(poweroff · freeze-patroni)은 etcd 리더 교체로"
+  echo "             Leader 열쇠가 약 30초 연장되어 전환이 늦어지거나, 재부팅된 $LEADER 가 다시 Leader 가 될 수 있음"
+else
+  echo "  etcd 리더: $EL"
+fi
 case "$MODE" in
   poweroff)     echo "  사람이 할 일: 아래 Enter 뒤 안내가 나오면 PowerShell 에서 $LEADER VM 전원 끄기" ;;
   freeze-patroni) echo "  ⚠ $LEADER 의 Patroni 를 얼림 → 약 25초 뒤 $LEADER VM 이 watchdog 으로 재부팅됨" ;;
@@ -80,13 +101,13 @@ grep -q " $LEADER" "$LOG" || die "시험 전 쓰기가 $LEADER 로 가지 않음
 case "$MODE" in
   poweroff)
     echo; echo "  ▶ 지금 PowerShell(영수 PC 또는 멘토 서버)에서:  VBoxManage controlvm chargeops-$LEADER poweroff"
-    read -rp "  전원을 끈 직후 Enter " _; TK=$(now) ;;
+    read -rp "  전원을 끈 직후 Enter " _; TK=$(now); TKE=$(date +%s) ;;
   freeze-patroni)
-    TK=$(now); on "$LEADER" 'sudo pkill -STOP -f "[p]atroni /etc/patroni/patroni.yml"; sleep 1; echo "  Patroni 상태 $(pgrep -f "[p]atroni /etc/patroni" | head -1 | xargs -r ps -o stat= -p) (T = 얼어 있음) · postgres $(pgrep -u postgres -xc postgres)개 (살아 있어야 이 시험의 의미가 있음)"' ;;
+    TK=$(now); TKE=$(date +%s); on "$LEADER" 'sudo pkill -STOP -f "[p]atroni /etc/patroni/patroni.yml"; sleep 1; echo "  Patroni 상태 $(pgrep -f "[p]atroni /etc/patroni" | head -1 | xargs -r ps -o stat= -p) (T = 얼어 있음) · postgres $(pgrep -u postgres -xc postgres)개 (살아 있어야 이 시험의 의미가 있음)"' ;;
   kill-all)
-    TK=$(now); on "$LEADER" 'sudo pkill -9 -f "[p]atroni /etc/patroni/patroni.yml"; sudo pkill -9 -u postgres -x postgres; sleep 1; echo "  남은 patroni $(pgrep -fc "[p]atroni /etc/patroni")개 · postgres $(pgrep -u postgres -xc postgres)개"' ;;
+    TK=$(now); TKE=$(date +%s); on "$LEADER" 'sudo pkill -9 -f "[p]atroni /etc/patroni/patroni.yml"; sudo pkill -9 -u postgres -x postgres; sleep 1; echo "  남은 patroni $(pgrep -fc "[p]atroni /etc/patroni")개 · postgres $(pgrep -u postgres -xc postgres)개"' ;;
   isolate)
-    TK=$(now); UNBLOCK=1
+    TK=$(now); TKE=$(date +%s); UNBLOCK=1
     on "$LEADER" "sudo firewall-cmd --direct --add-rule ipv4 filter OUTPUT 0 -p tcp --dport 2379 -j REJECT" >/dev/null || die "차단 규칙 추가 실패"
     WATCH_SEC=$((ISOLATE_SEC + 30)) ;;
 esac
@@ -103,24 +124,36 @@ kill "$WPID" "$RPID" 2>/dev/null; trap - EXIT INT TERM
 echo; echo "== 쓰기 받는 서버가 바뀐 순서 (시각 · 서버)"
 awk '{h=($2 ~ /^db-0/)?$2:"실패"; if(h!=p){print "  " $1, h; p=h}}' "$LOG"
 SEQ=$(awk '{h=($2 ~ /^db-0/)?$2:"실패"; if(h!=p){printf "%s ", h; p=h}}' "$LOG")
-LAST_OLD=$(awk -v o="$LEADER" '$2==o{t=$1} END{print t}' "$LOG")
+FAIL1=$(awk '$2 !~ /^db-0/{print $1; exit}' "$LOG")                                   # 첫 실패 (poweroff 는 Enter 보다 앞설 수 있음)
+LAST_OLD=$(awk -v o="$LEADER" -v f="${FAIL1:-99}" '$1<f && $2==o{t=$1} END{print t}' "$LOG")   # 장애 직전 옛 Leader 마지막 쓰기
+RESUME=$( [ -n "$FAIL1" ] && awk -v f="$FAIL1" '$1>f && $2 ~ /^db-0/{print $1, $2; exit}' "$LOG")  # 장애 뒤 첫 쓰기 (시각 서버)
 FIRST_NEW=$(awk -v n="$REPLICA" '$2==n{print $1; exit}' "$LOG")
 BACK=$(awk -v o="$LEADER" -v n="$REPLICA" '$2==n{s=1} s && $2==o{c++} END{print c+0}' "$LOG")
 DUAL=$(grep -c 'db-01=f db-02=f' "$RLOG")
 sec() { awk -F: '{print $1*3600+$2*60+$3}' <<<"$1"; }
-GAP=$( [ -n "$FIRST_NEW" ] && [ -n "$LAST_OLD" ] && awk -v a="$(sec "$LAST_OLD")" -v b="$(sec "$FIRST_NEW")" 'BEGIN{printf "%.1f", b-a}')
-FROMK=$( [ -n "$FIRST_NEW" ] && awk -v a="$(sec "$TK")" -v b="$(sec "$FIRST_NEW")" 'BEGIN{printf "%.1f", b-a}')
+GAP=$( [ -n "$RESUME" ] && [ -n "$LAST_OLD" ] && awk -v a="$(sec "$LAST_OLD")" -v b="$(sec "${RESUME% *}")" 'BEGIN{printf "%.1f", b-a}')
+FROMK=$( [ -n "$RESUME" ] && awk -v a="$(sec "$TK")" -v b="$(sec "${RESUME% *}")" 'BEGIN{printf "%.1f", b-a}')
+REBOOT=
+if [ "$MODE" = freeze-patroni ]; then   # watchdog 재부팅 확인: 옛 Leader 의 부팅 시각이 장애 뒤인가
+  BE=$(on "$LEADER" 'date -d "$(uptime -s)" +%s' 2>/dev/null)
+  [ -n "$BE" ] && [ "$BE" -gt "$TKE" ] && REBOOT="$(date -d "@$BE" +%T) (장애 뒤 $((BE - TKE))초)"
+fi
 echo "== 결과 ($MODE)"
-echo "  장애 시각              $TK"
+echo "  장애 시각              $TK$([ "$MODE" = poweroff ] && echo ' (Enter 기준 — 실제 꺼진 시각은 첫 실패 근처)')"
+echo "  첫 실패                ${FAIL1:-없음}"
 echo "  옛 Leader 마지막 쓰기   ${LAST_OLD:-없음} ($LEADER)"
-echo "  새 Leader 첫 쓰기       ${FIRST_NEW:-없음} ($REPLICA)"
-echo "  쓰기 멈춘 시간          ${GAP:-?}초 (장애 시각부터 ${FROMK:-?}초)"
-echo "  새 Leader 뒤 옛 서버 쓰기 ${BACK}회 · 같은 순간 Primary 두 대 ${DUAL}회"
-SELF=$(awk -v t="$TK" -v o="$LEADER" '$1>t && $2==o{print $1; exit}' "$LOG")     # 장애 뒤 옛 Leader 에 다시 쓰기 (스스로 복구)
+echo "  장애 뒤 첫 쓰기         ${RESUME:-없음}"
+[ "$MODE" = freeze-patroni ] && echo "  $LEADER 재부팅(watchdog)  ${REBOOT:-확인 안 됨}"
+echo "  쓰기 멈춘 시간          ${GAP:-?}초 (옛 Leader 마지막 쓰기부터 · 장애 시각부터 ${FROMK:-?}초)"
+echo "  새 Leader 뒤 옛 서버 쓰기 ${BACK}회 · 같은 순간 Primary 두 대 ${DUAL}회 · etcd 리더(시험 전) $EL"
+SELF=$( [ -n "$RESUME" ] && [ "${RESUME#* }" = "$LEADER" ] && echo "${RESUME% *}")   # 장애 뒤 첫 쓰기가 옛 Leader (스스로 복구)
 if [ -n "$FIRST_NEW" ] && [ "$BACK" = 0 ] && [ "$DUAL" = 0 ]; then
-  echo "  판정: PASS — 바뀐 순서: $SEQ"
+  echo "  판정: PASS — $REPLICA 자동 승격. 바뀐 순서: $SEQ"
 elif [ "$MODE" = kill-all ] && [ -z "$FIRST_NEW" ] && [ -n "$SELF" ] && [ "$DUAL" = 0 ]; then
-  echo "  판정: PASS (스스로 복구) — $LEADER 에서 $SELF 에 쓰기 재개. 바뀐 순서: $SEQ"
+  echo "  판정: PASS (스스로 복구) — systemd 가 Patroni 를 다시 띄워 $LEADER 에서 $SELF 에 쓰기 재개. 바뀐 순서: $SEQ"
+elif [ "$MODE" = freeze-patroni ] && [ -z "$FIRST_NEW" ] && [ -n "$SELF" ] && [ -n "$REBOOT" ] && [ "$DUAL" = 0 ]; then
+  echo "  판정: PASS (재부팅 뒤 스스로 복구) — watchdog 이 $LEADER 를 재부팅, 열쇠가 남아 있어 $LEADER 가 $SELF 에 다시 Leader. 바뀐 순서: $SEQ"
+  [ "$EL" = "$LEADER" ] && echo "        (시험 전 etcd 리더도 $LEADER — etcd 리더 교체로 열쇠가 연장된 경우. 안전 · 손실 없음)"
 else
   echo "  판정: FAIL — 바뀐 순서: $SEQ (기록: $LOG · $RLOG)"
 fi

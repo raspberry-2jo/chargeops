@@ -114,9 +114,23 @@ TO=db-01 bash ~/chargeops/db/ops/patroni/switchover.sh         # 평소 방향(d
 ```
 
 - 측정은 앱과 같은 길(6432)로 0.5초마다 쓰기 확인(`txid_current()` — 표에는 아무것도 쓰지 않음) + 두 서버에 직접 'Primary 인가' 를 1초마다.
-- **PASS** = 쓰기 받는 서버가 한 번만 바뀌고(옛 서버로 돌아가지 않음) 같은 순간 Primary 두 대가 0회. `kill-all` 은 같은 서버가 스스로 복구해도 PASS. 기록은 `~/patroni-drill-<MODE>-<시각>.log`.
+- **PASS** = 쓰기 받는 서버가 한 번만 바뀌고(옛 서버로 돌아가지 않음) 같은 순간 Primary 두 대가 0회.
+  **PASS (스스로 복구)** = 승격 없이 옛 Leader 가 다시 쓰기를 받음 + Primary 두 대 0회 — `kill-all`(systemd 재시작), `freeze-patroni`(watchdog 재부팅이 확인된 경우).
+  기록은 `~/patroni-drill-<MODE>-<시각>.log`.
+- **쓰기 멈춘 시간** = 옛 Leader 마지막 쓰기 → 장애 뒤 첫 쓰기. `poweroff` 의 '장애 시각' 은 사람이 Enter 를 누른 시각이라 몇 초 늦다.
+- 시험 전에 **etcd 리더**를 보여 준다. DB Leader 와 같은 서버면 서버째 멈추는 시험(poweroff · freeze-patroni)에서 전환이 약 30초 늦어질 수 있다 (11장).
 - 재부팅 · 전원을 끈 서버는 다시 켜지면 **격리 부팅 없이** Patroni 가 Replica 로 되감아 붙인다 (Leader 열쇠가 이미 다른 서버에 있으므로).
 - 마지막에 `bash deploy/final-server/check-all.sh` — Patroni 항목이 하나 늘어 합계 PASS 22.
+
+**운영 DB 시험 결과 (영수 PC, 2026-10-16 ~ 17)** — 네 가지 모두 Primary 두 대 0회 · 데이터 손실 0
+
+| 시험 | 판정 | 쓰기 멈춤 | 무엇이 일어났나 |
+|---|---|---|---|
+| `isolate` (Leader 를 etcd 에서 고립) | PASS | 15.1초 | db-01 스스로 읽기 전용 강등 → db-02 승격 |
+| `kill-all` (Patroni + PostgreSQL 강제 종료) | PASS (스스로 복구) | 약 15초 | systemd 가 5초 뒤 Patroni 재시작 → 열쇠가 남아 있어 db-01 이 그대로 Leader |
+| `freeze-patroni` (Patroni 얼림) | PASS (재부팅 뒤 스스로 복구) | 약 38초 | 약 21초 뒤 watchdog 재부팅 → db-01 이 etcd 리더도 겸해 열쇠 연장 → 재부팅된 db-01 이 다시 Leader |
+| `poweroff` (VM 전원 끔) | PASS | 35.5초 | db-02 자동 승격 (TL 17) · 다시 켠 db-01 은 격리 부팅 없이 Replica 로 붙음 |
+| 원복 `switchover` (db-02 → db-01) | — | 4.0초 | 명령부터 db-01 쓰기 확인까지 · 뒤이어 `check-all` PASS 22 |
 
 ## 7. 평소 운영
 
@@ -154,7 +168,7 @@ Patroni 를 정상 종료 → `postgresql.base.conf` 를 `postgresql.conf` 로 �
 
 1. 영수 PC 에서 4~6장이 모두 PASS 인 상태의 저장소를 멘토 서버 `C:\chargeops-lab` 에 맞춘다 → mgmt 에서 rsync.
 2. 오늘 백업 확인 (`convert.sh` ② 가 보여 줌). db VM 에는 vagrant snapshot 을 쓰지 않는다.
-3. 4장 → 5장 → `status.sh` → `check-all.sh`.
+3. 4장 → 5장 → **12장 ①**(pg_hba 한 줄 — PGDATA 안 파일이라 저장소를 맞춰도 서버에는 안 들어감) → `status.sh` → `check-all.sh`.
 4. 시험(6장)은 멘토 서버에서는 `DRILL_ON_SERVER=yes` 를 붙여야 돈다 — 빠른 실행표 30 처럼 사용자 확인 뒤, `isolate` 하나만 권장.
 5. Claude Code 로 진행할 때: 이 문서의 명령을 그대로 실행하게 하고, 새로 만들게 하지 않는다. `convert.sh` · `drill.sh` · `rollback.sh` 는 사용자 확인 뒤에만.
 
@@ -166,8 +180,9 @@ Patroni 를 정상 종료 → `postgresql.base.conf` 를 `postgresql.conf` 로 �
 | softdog 은 소프트웨어 — 커널째 멈추면 동작 못 함 | 하드웨어 watchdog (iTCO, IPMI) |
 | etcd 3번째가 mgmt — 관리 서버와 DB 판정이 한 장애에 묶임 | 별도 작은 서버 3대 또는 다른 랙 |
 | 동기 복제 아님 — 자동 전환 때 최대 1MB(마지막 수 초) 손실 가능 | `synchronous_mode: true` (쓰기 지연과 교환) |
+| etcd 가 DB 서버에 같이 있음 — DB Leader 가 etcd 리더도 겸하다 서버째 죽으면 etcd 리더 교체 때 Leader 열쇠가 ttl(30초)만큼 연장되어 전환이 늦어짐 (2026-10-17 실측) | etcd 를 DB 와 다른 서버 3대에. 실습에서는 계획 작업 전 `etcdctl move-leader` 로 etcd 리더를 mgmt 로 옮길 수 있음 (선택) |
 
-## 11. 막혔던 점 (시험 클러스터, 2026-10-16)
+## 11. 막혔던 점 (시험 클러스터 2026-10-16 · 운영 DB 2026-10-16 ~ 17)
 
 | 증상 | 원인 | 해결 |
 |---|---|---|
@@ -177,3 +192,23 @@ Patroni 를 정상 종료 → `postgresql.base.conf` 를 `postgresql.conf` 로 �
 | 재부팅한 서버의 etcd 에 `No route to host` | etcd 가 자동 시작이 아니었고 포트도 임시로만 열었음 | etcd · Patroni `enabled`, 포트는 fw_rules(영구) |
 | Patroni 로컬 접속이 거부될 뻔함 (설계 검토에서 발견) | TCP 로 붙으면 localhost(127.0.0.1) 인데 pg_hba 는 127.0.0.1 의 postgres 를 거부 | `use_unix_socket: true` → `local all postgres peer` |
 | 운영 DB drill `isolate`: 강등 · 승격은 됐는데 앱 쓰기가 2분 넘게 실패 (2026-10-16 20:56) | ① 강등된 db-01 의 PgBouncer 가 PostgreSQL 이 꺼진 채 앱 접속을 받아 최대 120초 붙잡음 ② Patroni 가 승격 명령 직후(아직 읽기 전용) 콜백을 불러, 그때 restart 한 db-02 PgBouncer 가 '읽기 전용' 을 기억 | 콜백을 on_start · on_stop · on_role_change 에 걸고, 내려가면 PgBouncer stop · 역할이 실제로 바뀐 것을 확인한 뒤 restart |
+| 운영 DB drill `freeze-patroni`: watchdog 재부팅은 됐는데 db-02 가 승격하지 않고 재부팅된 db-01 이 다시 Leader (2026-10-17 01:12, FAIL 로 판정됨) | db-01 이 **etcd 리더**였다 (01:12:56.5 db-02 의 etcd 에 `lost leader c` → `became leader`). etcd 는 리더가 바뀔 때 모든 열쇠의 만료를 다시 ttl 만큼 늘린다 → Leader 열쇠 만료가 약 01:13:26 으로 밀림 → 그사이 db-01 이 부팅해(01:13:03) 자기 이름의 열쇠를 다시 잡음 (`I am the leader but not owner of the lease`). Primary 두 대 0 · 손실 0 | 안전한 동작으로 보고 drill 판정에 'PASS (재부팅 뒤 스스로 복구)' 추가. 시험 · status 에 etcd 리더 표시 (10장 한계) |
+| Replica 의 Patroni 로그에 10초마다 `no pg_hba.conf entry for replication connection from host "127.0.0.1", user "replicator"` (2026-10-17 발견) | Patroni 가 자기 timeline 을 localhost 복제 연결로 읽는데 pg_hba 는 replicator 를 10.10.30.0/24 에서만 받음 → `timeline=None`. 승격은 됐지만 판단 정보 하나가 빔 | pg_hba `local replication replicator scram-sha-256` + patroni.yml `use_unix_socket_repl: true` (12장) |
+| drill 결과의 '쓰기 멈춘 시간' 이 `?초`, 옛 Leader 마지막 쓰기가 복구 뒤 시각으로 찍힘 | 승격이 없으면 계산을 안 했고, 마지막 쓰기를 기록 전체에서 찾았음 | 첫 실패 직전의 마지막 쓰기 → 장애 뒤 첫 쓰기(어느 서버든)로 계산 |
+
+## 12. 2026-10-17 보강 적용 (이미 전환을 끝낸 서버)
+
+pg_hba 한 줄 + Patroni 설정 한 줄. **PostgreSQL · Patroni 재시작 없음** (pg_hba 는 reload, Patroni 는 `systemctl reload` = 설정 다시 읽기). 쓰기 중단 없음.
+
+```bash
+# ===== 실행할 명령어 ===== (mgmt — 한 줄씩. ① pg_hba 두 서버 → ② Patroni 설정 → ③ 확인)
+for h in db-01 db-02; do ssh $h "sudo grep -q '^local *replication *replicator' /var/lib/pgsql/17/data/pg_hba.conf || sudo sed -i '/^local *all *all *scram-sha-256/a local   replication        replicator                                           scram-sha-256' /var/lib/pgsql/17/data/pg_hba.conf; sudo -u postgres psql -XAtc 'select pg_reload_conf()'; sudo grep -n '^local' /var/lib/pgsql/17/data/pg_hba.conf"; done
+cd ~/chargeops/ansible && ansible-playbook patroni.yml --tags patroni
+ssh db-02 "sudo journalctl -u patroni --since '-1min' --no-pager | grep -c 'no pg_hba.conf entry'"
+```
+
+- ① 서버마다 `t`(reload 성공) 와 `local` 세 줄(postgres peer · all · replication replicator)이 보이면 됨.
+- ② 끝에 `RUNNING HANDLER [Patroni 설정 다시 읽기]` 가 보이고 failed=0.
+- ③ 1분쯤 뒤 `0` 이면 끝 (Replica 의 오류가 사라짐). 0 이 아니면 Replica 의 Patroni 만 재시작: `ssh db-02 "sudo systemctl restart patroni"` — Replica 는 쓰기와 무관, PostgreSQL 은 그대로 (`KillMode=process`).
+- pg_hba.conf 는 PGDATA 안에 있어 pg_rewind · 복제 재생성 때 상대 서버 것이 복사된다 → **두 서버 모두** 같은 줄이 있어야 한다.
+

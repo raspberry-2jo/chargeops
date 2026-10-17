@@ -60,6 +60,9 @@ postgresql:
   # Patroni 자신(postgres 계정)은 소켓으로 접속 → pg_hba 첫 줄 'local all postgres peer' (비밀번호 없이).
   #   TCP 로 두면 localhost(127.0.0.1)로 붙는데, 지금 pg_hba 는 127.0.0.1 의 postgres 를 거부한다 (맨 끝 reject 줄)
   use_unix_socket: true
+  # Replica 의 Patroni 가 자기 timeline 을 읽는 복제 연결도 소켓으로 → pg_hba 'local replication replicator' 줄 (2026-10-17 추가)
+  #   TCP(localhost)로 두면 127.0.0.1 의 replicator 가 거부되어 timeline=None 으로 판단 (승격은 됐지만 판단 정보 하나가 빔)
+  use_unix_socket_repl: true
   parameters:
     unix_socket_directories: /run/postgresql, /tmp     # PGDG 기본값과 같게 (pgBackRest · psql 이 쓰는 경로 유지)
   callbacks:   # PgBouncer 를 PostgreSQL 상태에 맞춤 (내려가면 stop, 역할이 정해지면 restart) — db/ops/patroni/patroni-on-role-change.sh
