@@ -19,6 +19,7 @@
 | `../quality/V20261014160300__dq_check.sql` | 데이터 품질 점검 6항목 → `dq_result`. 실행 권한 | `13_anomaly_dq.sql` 90줄부터 |
 | `../views/V20261014160400__ops_views.sql` | Grafana 관제 화면 · 알림용 조회 뷰 6개(조치 필요 · 조치 기록 · 장애 · 알림 · 충전기 카드 · 역할) | `17_ops_ui.sql` ④ |
 | `V20261014160500__cron_jobs.sql` | pg_cron 상시 작업 6개 (가동률 10분 · 일 통계 · 파티션 · 장기 방치 · 기록 정리 · 상위 표 통계 03:30) | `15_cron.sql` |
+| `V20261020103000__csms_session.sql` | CSMS 다중 파드 대응: 충전기별 현재 세션 `charger_session` · 상태 기록 `fn_record_status`(DB 현재 상태와 다를 때만) · 세션 열기/닫기(최신 세션만 통신이상 기록). app_writer 실행 권한 | `18_csms_session.sql` |
 
 세 폴더(`db/migrations` · `db/views` · `db/quality`)의 V 파일을 **파일 이름 순서로 섞어서** 적용합니다 (Flyway 의 여러 위치와 같은 방식). 실습 충전기 등록은 V 체인 밖 `db/seed/lab_chargers.sql` — 실습 · 시연 DB 에만 손으로.
 
