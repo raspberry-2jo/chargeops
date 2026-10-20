@@ -10,7 +10,7 @@
   · 끝날 때(SIGTERM) 연결을 DRAIN_SECONDS 에 걸쳐 나눠 닫는다 → 배포 · 파드 종료 때 재접속 폭주 완화
   · PEERS_DNS 가 비어 있으면 예전과 똑같이 단일 파드로 동작
 """
-import asyncio, logging, os, socket, time
+import asyncio, logging, os, socket, time, uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -38,6 +38,7 @@ RESET_TIMEOUT = {"Soft": 90, "Hard": 120}         # 성공 판정: 이 시간 �
 #   10/13 까지는 Available 만 성공으로 봐서, 실제로 복구된 충전 중 충전기가 'failed' 로 남았다 (2026-10-14 수정)
 RECOVERED = ("Available", "Preparing", "Charging")
 POD_IP = os.environ.get("POD_IP", "")             # 내 파드 IP (downward API) — 전달 대상에서 나를 뺀다
+POD = os.environ.get("HOSTNAME", "csms")          # 내 파드 이름 — charger_session.pod (18_csms_session.sql, 2026-10-20)
 PEERS_DNS = os.environ.get("PEERS_DNS", "")       # headless 서비스 이름 (csms-pods.<ns>.svc.cluster.local). 비우면 단일 파드
 DRAIN_SECONDS = float(os.environ.get("DRAIN_SECONDS", "20"))   # 종료 때 연결을 나눠 닫는 시간 (terminationGracePeriod 보다 짧게)
 
@@ -132,42 +133,22 @@ class ChargePoint(OcppChargePoint):
 
 
 async def record_status(cid: str, status: str, error_code: str | None, ts: str | None):
-    """OCPP 상태 → 코드. 코드가 '바뀔 때만' 이력 1행 (Preparing → Charging → Finishing 은 모두 3 이라 한 번)"""
+    """OCPP 상태 → 코드. 바뀌었는지는 DB 현재 상태와 비교 (fn_record_status, 18_csms_session.sql)
+    파드 메모리로 비교하면 다른 파드로 재접속했을 때 옛 상태가 남아 기록이 빠지거나 두 번 쌓인다 (2026-10-20)"""
     st = state[cid]
     lab = {"charger_id": cid, "station_id": st["station_id"]}
     err = None if error_code in (None, "NoError") else error_code
-    if st.get("status") == status and st.get("err") == err:     # 상태가 같아도 원인 코드가 바뀌면 기록 (과전류 등)
-        return
-    if status == "Faulted" and st.get("status") != "Faulted":
-        c_fault.labels(**lab).inc()
     g_faulted.labels(**lab).set(1 if status == "Faulted" else 0)
     g_charging.labels(**lab).set(1 if status == "Charging" else 0)
-    st["status"], st["status_at"] = status, time.time()
+    st["status"], st["status_at"], st["err"] = status, time.time(), err   # 메모리는 지표 · 조회용으로만
     code = OCPP_CODE.get(status, "9")
-    log.info("status %s -> %s [%s] (%s)", cid, status, code, error_code)
-    if st.get("code") == code and st.get("err") == err:
-        return
-    st["code"], st["err"] = code, err
-    changed = ts or now().isoformat()
-    args = {"cid": cid, "code": code, "ts": changed, "src": st["source"], "err": err}
-    await db("""INSERT INTO status_history (changed_at, charger_id, source, status_code, error_code)
-                VALUES (%(ts)s, %(cid)s, %(src)s, %(code)s, %(err)s)
-                ON CONFLICT (charger_id, changed_at, status_code) DO NOTHING""", args)
-    # 현재 상태 + 충전 시각 (공공 API 의 nowTsdt · lastTsdt · lastTedt 와 같은 뜻으로 채움)
-    await db("""INSERT INTO charger_status_current AS cur
-                       (charger_id, status_code, changed_at, source, error_code, charging_start_at, last_heartbeat_at)
-                VALUES (%(cid)s, %(code)s, %(ts)s, %(src)s, %(err)s,
-                        CASE WHEN %(code)s = '3' THEN %(ts)s::timestamptz END, now())
-                ON CONFLICT (charger_id) DO UPDATE SET
-                  status_code = EXCLUDED.status_code, changed_at = EXCLUDED.changed_at, source = EXCLUDED.source,
-                  error_code = EXCLUDED.error_code, received_at = now(),
-                  charging_start_at = CASE WHEN EXCLUDED.status_code = '3'
-                                           THEN coalesce(cur.charging_start_at, EXCLUDED.changed_at) END,
-                  last_charge_start_at = CASE WHEN EXCLUDED.status_code <> '3' AND cur.charging_start_at IS NOT NULL
-                                              THEN cur.charging_start_at ELSE cur.last_charge_start_at END,
-                  last_charge_end_at = CASE WHEN EXCLUDED.status_code <> '3' AND cur.status_code = '3'
-                                            THEN EXCLUDED.changed_at ELSE cur.last_charge_end_at END
-                WHERE EXCLUDED.changed_at >= cur.changed_at""", args)
+    changed = (await db("SELECT fn_record_status(%s, %s, %s, %s::timestamptz, %s)",
+                        (cid, code, err, ts or now().isoformat(), st["source"]), "one"))[0]
+    if changed:
+        st["code"] = code
+        if status == "Faulted":
+            c_fault.labels(**lab).inc()
+        log.info("status %s -> %s [%s] (%s)", cid, status, code, error_code)
 
 
 async def load_charger(cid: str) -> dict | None:
@@ -201,6 +182,8 @@ async def on_connect(ws):
     c_conn.labels("accepted").inc()
     state[cid] = {**state.get(cid, {}), **info}
     cp = ChargePoint(cid, ws, response_timeout=10)          # 충전기 무응답 시 10초 후 실패 처리
+    session = str(uuid.uuid4())
+    await db("SELECT fn_session_open(%s, %s::uuid, %s, %s)", (cid, session, POD, POD_IP))   # 최신 세션 = 나
     connected[cid] = cp
     lab = cp.labels()
     g_connected.labels(**lab).set(1)
@@ -217,13 +200,25 @@ async def on_connect(ws):
             # 0 으로 남겨 둔다 (지우지 않음): 감지 규칙이 충전기별 max by 라 다른 파드에 다시 붙으면 1 이 이기고,
             # 어디에도 안 붙으면 0 이 남아 C-02 가 울린다. 지우면 진짜 두절을 놓친다 (WBS 3.7, 2026-10-15)
             g_connected.labels(**lab).set(0)
-            await record_status(cid, "Offline", "ConnectionLost", None)   # C-02 통신 두절
-            if cid.startswith("LT-"):          # 부하 시험 종료 시 1,000대 C-02 경보 폭주 방지: 지표 제거
-                for g in (g_connected, g_faulted, g_charging, g_hb, g_temp, g_cur, g_rated, c_fault):
-                    try:
-                        g.remove(*lab.values())
-                    except KeyError:
-                        pass
+        g_faulted.labels(**lab).set(0)         # 이 파드는 더 이상 이 충전기를 갖지 않음 → max by 에 옛 1 이 남지 않게
+        g_charging.labels(**lab).set(0)
+        # C-02 통신 두절: DB 의 최신 세션이 나일 때만 기록. 다른 파드에 새 세션이 있으면 건너뜀 (가짜 통신이상 방지)
+        try:
+            closed = (await db("SELECT fn_session_close(%s, %s::uuid, %s)", (cid, session, state[cid]["source"]), "one"))[0]
+        except Exception as e:
+            closed = False
+            log.warning("session close %s 실패: %s", cid, e)
+        if closed:
+            state[cid]["status"], state[cid]["status_at"] = "Offline", time.time()
+            log.info("status %s -> Offline [1] (ConnectionLost)", cid)
+        else:
+            log.info("disconnect %s: 새 세션이 있어 통신이상 기록 생략", cid)
+        if cid.startswith("LT-"):              # 부하 시험 종료 시 1,000대 C-02 경보 폭주 방지: 지표 제거
+            for g in (g_connected, g_faulted, g_charging, g_hb, g_temp, g_cur, g_rated, c_fault):
+                try:
+                    g.remove(*lab.values())
+                except KeyError:
+                    pass
 
 
 # ───────── 복구 REST API ─────────
@@ -294,13 +289,22 @@ async def owner_of(cid: str) -> tuple[str, dict] | None:
 async def forward(cid: str, path: str, req: BaseModel, token: str | None, forwarded: str | None) -> dict | None:
     """이 파드에 없는 충전기면 붙어 있는 파드로 넘기고 그 응답을 돌려준다. 넘길 필요가 없으면 None (= 여기서 처리).
     안전장치(멱등 키 · 충전 중 차단 · 1시간 3회)와 감사 기록은 받은 파드가 그대로 한다 → 중복 실행 없음"""
-    if forwarded or cid in connected:
+    if forwarded:
         return None
-    found = await owner_of(cid)
-    if found is None:
-        c_fwd.labels("not_found").inc()
-        return None                                   # 아무 데도 없음 → 여기서 guard 가 409 "charger not connected"
-    ip = found[0]
+    # 최신 세션을 가진 파드는 DB(charger_session)로 판단 — 옛 세션이 메모리에 남아 있는 파드로 보내지 않게 (2026-10-20)
+    row = await db("SELECT pod, pod_ip FROM charger_session WHERE charger_id = %s", (cid,), "one")
+    if row and row[0] == POD:
+        return None                                   # 내가 최신 세션 → 여기서 처리
+    if row and row[1] and row[1] != POD_IP:
+        ip = row[1]
+    else:                                             # 세션 기록이 없으면 예전 방식(다른 파드에 물어보기)
+        if cid in connected:
+            return None
+        found = await owner_of(cid)
+        if found is None:
+            c_fwd.labels("not_found").inc()
+            return None                               # 아무 데도 없음 → 여기서 guard 가 409 "charger not connected"
+        ip = found[0]
     code, data = await asyncio.to_thread(_http, "POST", f"http://{ip}:8000{path}", req.model_dump(), token)
     c_fwd.labels("ok" if code < 400 else "error").inc()
     log.info("forward %s %s -> %s (%d)", path, cid, ip, code)
@@ -327,7 +331,8 @@ async def guard(cid: str, req: ActionReq, step: str, limit: bool = True) -> Char
     cp = connected.get(cid)
     if cp is None:
         raise HTTPException(409, "charger not connected")
-    if state[cid].get("status") == "Charging":
+    row = await db("SELECT status_code FROM charger_status_current WHERE charger_id = %s", (cid,), "one")
+    if row and row[0] == "3":                                 # 충전 중(코드 3) — 파드 메모리 대신 DB
         await audit(req, cid, step, "blocked", ":blocked")
         raise HTTPException(409, "charging in progress - action deferred")
     if limit:
@@ -346,12 +351,18 @@ async def verify_reset(cid: str, req: ResetReq, started: float):
     """리셋 후 제한 시간 안에 Available 로 돌아오는지 확인해 결과를 추가 기록"""
     deadline = started + RESET_TIMEOUT[req.type]
     await asyncio.sleep(3)
+    # DB 로 판정 (다른 파드로 재접속해도 됨): 리셋 뒤 새 세션이 열렸고, 열린 지 5초 지나(Boot · Status 수신) 상태가 이용 가능
+    #   상태 시각(changed_at)은 안 봄 — 옛 세션 끊김이 늦게 감지되면 1 이 안 남아 2 → 2 로 '안 바뀐' 것처럼 보이기 때문
+    codes = sorted({OCPP_CODE[s] for s in RECOVERED if s in OCPP_CODE})
+    sql = """SELECT cur.status_code = ANY(%s) FROM charger_session s JOIN charger_status_current cur USING (charger_id)
+             WHERE s.charger_id = %s AND s.connected_at > to_timestamp(%s) AND s.connected_at < now() - interval '5 seconds'"""
+    ok = False
     while time.time() < deadline:
-        st = state.get(cid, {})
-        if cid in connected and st.get("status") in RECOVERED and st.get("status_at", 0) > started:
+        row = await db(sql, (codes, cid, started), "one")
+        if row and row[0]:
+            ok = True
             break
         await asyncio.sleep(2)
-    ok = cid in connected and state[cid].get("status") in RECOVERED
     result = "succeeded" if ok else "failed"
     c_reset.labels(req.type, result).inc()
     await audit(req, cid, f"{req.type.lower()}_reset", result, ":result")
