@@ -29,10 +29,10 @@
 
 ## 첫 빌드
 
-Linux `chargeops-agent`에 Python 3.12, venv, Git, Docker CLI/Engine을 준비합니다.
-Jenkins Credentials에는 Username/password 형식의 `harbor-push` (기존 credential ID 유지)를 등록합니다.
-Username/password는 새 Registry의 계정으로 설정합니다. 익명 Registry는 Jenkins의 `REGISTRY_CREDENTIALS_ID`를 비웁니다.
-먼저 Python 베이스 이미지 두 태그를 복제합니다. 인증 여부에 따라 GitOps의 imagePullSecrets를 준비합니다.
+Linux `mgmt-agent`에 Python 3.12, venv, Git, Docker CLI/Engine을 준비합니다.
+앱 빌드 Jenkins는 인증 없는 Registry를 사용하며 Docker 로그인·로그아웃 및 Registry credential 설정을 사용하지 않습니다.
+이미지는 `registry.chargeops.lab:5000/chargeops/` 아래로 Push합니다. 먼저 Python 베이스 이미지 두 태그를 복제합니다.
+이미지 발행 브랜치는 `dev`입니다. Jenkins Job의 SCM 브랜치를 `*/dev`로 설정하며, PR 빌드와 다른 브랜치 빌드에서는 Push하지 않습니다.
 Jenkins 에이전트와 클러스터에서 Registry DNS·접속 및 TLS/HTTP 설정을 확인하고, 별도 GitOps 저장소의 이미지 주소와 Image Updater 설정도 함께 변경합니다.
 
 Job `chargeops-ci`: Pipeline script from SCM / Git / `https://github.com/chanjook1m/chargeops.git` / `*/main` / `Jenkinsfile`.

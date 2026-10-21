@@ -1,5 +1,5 @@
 pipeline {
-  agent { label 'chargeops-agent' }
+  agent { label 'mgmt-agent' }
   options {
     timestamps()
     disableConcurrentBuilds()
@@ -8,16 +8,13 @@ pipeline {
   }
   triggers { pollSCM('H/5 * * * *') }
   parameters {
-    string(name: 'REGISTRY_CREDENTIALS_ID', defaultValue: 'harbor-push',
-      description: 'Registry username/password credential ID (legacy ID retained). Empty for anonymous registry.')
     booleanParam(name: 'BUILD_ALL_IMAGES', defaultValue: false,
       description: 'Build all nine images. The first build automatically builds all images.')
   }
   environment {
-    REGISTRY_HOST = 'registry.chargeops.lab:5000'
     REGISTRY = 'registry.chargeops.lab:5000/chargeops'
     APP_ROOT = 'infra/app'
-    PUBLISH_BRANCH = 'kim_chanju'
+    PUBLISH_BRANCH = 'dev'
   }
   stages {
     stage('Checkout') {
@@ -128,58 +125,37 @@ pipeline {
     stage('Registry Build and Push: changed images only') {
       when { expression { env.BUILD_IMAGES?.trim() } }
       steps {
-        script {
-          def buildAndPush = {
-            dir(env.APP_ROOT) {
-              sh '''
-                set -eu
-                set +x
-                # Authenticate before pulling private base images. PR/non-publish builds
-                # use anonymous pull or the agent's existing read-only Docker config.
-                if [ -n "${REGISTRY_USER:-}" ]; then
-                  export DOCKER_CONFIG="$(mktemp -d)"
-                  trap 'docker logout "$REGISTRY_HOST" >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
-                  printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY_HOST" -u "$REGISTRY_USER" --password-stdin
-                fi
-                build_if_selected() {
-                  NAME="$1"
-                  DOCKERFILE="$2"
-                  CONTEXT="$3"
-                  case " $BUILD_IMAGES " in
-                    *" $NAME "*)
-                      docker build --pull -f "$DOCKERFILE" \
-                        -t "$REGISTRY/$NAME:$IMAGE_TAG" "$CONTEXT"
-                      ;;
-                  esac
-                }
-                build_if_selected chargeops-chatops-bot docker/chatops-bot.Dockerfile .
-                build_if_selected chargeops-alert-router docker/router.Dockerfile .
-                build_if_selected chargeops-mock-csms docker/mock-csms.Dockerfile .
-                build_if_selected chargeops-ai-gateway apps/ai_gateway/Dockerfile apps
-                build_if_selected chargeops-v2-chatops-bot apps/chatops_bot/Dockerfile apps
-                build_if_selected chargeops-v2-csms apps/csms/Dockerfile apps
-                build_if_selected chargeops-v2-notifier apps/notifier/Dockerfile apps
-                build_if_selected chargeops-v2-vcharger apps/vcharger/Dockerfile apps
-                build_if_selected chargeops-v2-collector apps/collector/Dockerfile apps
-                if [ "$PUBLISH_IMAGES" = 'true' ]; then
-                  for NAME in $BUILD_IMAGES; do
-                    docker push "$REGISTRY/$NAME:$IMAGE_TAG"
-                    docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$REGISTRY/$NAME:dev"
-                    docker push "$REGISTRY/$NAME:dev"
-                  done
-                fi
-              '''
+        dir(env.APP_ROOT) {
+          sh '''
+            set -eu
+            build_if_selected() {
+              NAME="$1"
+              DOCKERFILE="$2"
+              CONTEXT="$3"
+              case " $BUILD_IMAGES " in
+                *" $NAME "*)
+                  docker build --pull -f "$DOCKERFILE" \
+                    -t "$REGISTRY/$NAME:$IMAGE_TAG" "$CONTEXT"
+                  ;;
+              esac
             }
-          }
-          // Never expose push credentials to PR or non-publish branch builds.
-          if (env.PUBLISH_IMAGES == 'true' && params.REGISTRY_CREDENTIALS_ID?.trim()) {
-            withCredentials([usernamePassword(credentialsId: params.REGISTRY_CREDENTIALS_ID.trim(),
-              usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASSWORD')]) {
-              buildAndPush()
-            }
-          } else {
-            buildAndPush()
-          }
+            build_if_selected chargeops-chatops-bot docker/chatops-bot.Dockerfile .
+            build_if_selected chargeops-alert-router docker/router.Dockerfile .
+            build_if_selected chargeops-mock-csms docker/mock-csms.Dockerfile .
+            build_if_selected chargeops-ai-gateway apps/ai_gateway/Dockerfile apps
+            build_if_selected chargeops-v2-chatops-bot apps/chatops_bot/Dockerfile apps
+            build_if_selected chargeops-v2-csms apps/csms/Dockerfile apps
+            build_if_selected chargeops-v2-notifier apps/notifier/Dockerfile apps
+            build_if_selected chargeops-v2-vcharger apps/vcharger/Dockerfile apps
+            build_if_selected chargeops-v2-collector apps/collector/Dockerfile apps
+            if [ "$PUBLISH_IMAGES" = 'true' ]; then
+              for NAME in $BUILD_IMAGES; do
+                docker push "$REGISTRY/$NAME:$IMAGE_TAG"
+                docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$REGISTRY/$NAME:dev"
+                docker push "$REGISTRY/$NAME:dev"
+              done
+            fi
+          '''
         }
       }
     }
