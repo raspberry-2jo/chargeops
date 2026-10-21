@@ -27,6 +27,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("csms")
 logging.getLogger("ocpp").setLevel(logging.WARNING)   # 메시지 원문 로그는 끔(필요 시 INFO)
 
+# 열 수 있는 파일 수(soft) 를 hard 까지 올림 (2026-10-21)
+#   WebSocket 연결 1개 = 파일 1개. 컨테이너 기본 soft 1,024 → 파드당 약 993대에서 새 접속 실패 (부하 시험 4,000대 중단 원인)
+#   hard 까지는 권한 없이 올릴 수 있음 (실서버 hard 524,288)
+try:
+    import resource
+    _soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if _hard == resource.RLIM_INFINITY or _hard > _soft:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (_hard, _hard))
+    log.info("open files limit %s -> %s", _soft, resource.getrlimit(resource.RLIMIT_NOFILE)[0])
+except (ImportError, ValueError, OSError) as e:
+    log.warning("open files limit unchanged: %s", e)
+
 DB_DSN = os.environ["DB_DSN"]                     # PgBouncer(쓰기 풀) 접속 문자열 — 주소 두 개 + target_session_attrs=read-write
 API_TOKEN = os.environ.get("API_TOKEN", "")       # 봇 → CSMS 내부 호출 인증
 REQUIRE_CN = os.environ.get("REQUIRE_CN", "true") == "true"
