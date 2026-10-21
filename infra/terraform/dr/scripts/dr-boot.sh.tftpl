@@ -1,0 +1,27 @@
+#!/bin/bash
+# DR-DB 첫 부팅: S3 백업 저장소 설정 → (auto_restore 면) 훈련 모드로 자동 복원. 결과는 /var/log/dr-restore.log
+#   키 없음 — 서버에 붙은 IAM 역할(읽기만)로 S3 에 접근 (repo2-s3-key-type=auto)
+#   훈련 모드(drill): 복원본은 저장소에 아무것도 올리지 않는다 → 운영 백업은 그대로
+set -uo pipefail
+exec > /var/log/dr-restore.log 2>&1
+echo "== 부팅 $(date -Is) · $(cat /etc/chargeops-golden 2>/dev/null | head -2 | tr '\n' ' ')"
+install -d -m 750 /etc/pgbackrest /etc/pgbackrest/conf.d
+cat > /etc/pgbackrest/conf.d/repo2-aws.conf <<CONF
+[global]
+repo2-type=s3
+repo2-s3-endpoint=s3.${region}.amazonaws.com
+repo2-s3-region=${region}
+repo2-s3-bucket=${bucket}
+repo2-path=${repo_path}
+repo2-retention-full=2
+repo2-s3-key-type=auto
+CONF
+chgrp -R postgres /etc/pgbackrest
+chmod 640 /etc/pgbackrest/conf.d/repo2-aws.conf
+%{ if auto_restore ~}
+echo yes | DR_MODE=drill /usr/local/sbin/dr-restore.sh
+rc=$?
+echo "== 끝 $(date -Is) · 종료 코드 $rc"
+%{ else ~}
+echo "자동 복원 꺼짐 — Session Manager 로 들어가:  echo yes | sudo DR_MODE=drill /usr/local/sbin/dr-restore.sh"
+%{ endif ~}

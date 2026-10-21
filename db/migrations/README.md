@@ -13,6 +13,15 @@
 | `V20261013113300__arch_codes.sql` | 공공 API 상태 코드 ↔ OCPP 상태 대응, 고장 코드, `is_down` | `10_arch_codes.sql` |
 | `V20261013113400__arch_tables.sql` | 계측 · 장애 · 감사 · 승인 · 권한 · 알림 · AI · 이상치 · 품질 · 통계 테이블, 파티션 함수 | `11_arch_tables.sql` |
 | `V20261013113500__roles_and_grants.sql` | 계정 6개와 최소 권한, 감사 기록 추가만 허용 트리거. **비밀번호 없음** | `14_security.sql` |
+| `V20261014160000__ops_ui_columns.sql` | 장애에 담당 · 원인 코드 · 한 줄 상황 · Slack 링크 칸, Slack 이름표 `slack_user` | `17_ops_ui.sql` ① ② |
+| `../views/V20261014160100__stats_uptime.sql` | 통계 대상 · 상태 구간 · **일 가동률(구체화 뷰)** · MTTR · 운영기관 일/주/월 통계 · 장기 방치(C-05). report_ro 권한 | `12_stats.sql` |
+| `../views/V20261014160200__anomaly_score.sql` | 이상 징후 점수 뷰 · 감지 함수(SECURITY DEFINER) · 주간 검토. 실행 권한 | `13_anomaly_dq.sql` 앞부분 |
+| `../quality/V20261014160300__dq_check.sql` | 데이터 품질 점검 6항목 → `dq_result`. 실행 권한 | `13_anomaly_dq.sql` 90줄부터 |
+| `../views/V20261014160400__ops_views.sql` | Grafana 관제 화면 · 알림용 조회 뷰 6개(조치 필요 · 조치 기록 · 장애 · 알림 · 충전기 카드 · 역할) | `17_ops_ui.sql` ④ |
+| `V20261014160500__cron_jobs.sql` | pg_cron 상시 작업 6개 (가동률 10분 · 일 통계 · 파티션 · 장기 방치 · 기록 정리 · 상위 표 통계 03:30) | `15_cron.sql` |
+| `V20261020103000__csms_session.sql` | CSMS 다중 파드 대응: 충전기별 현재 세션 `charger_session` · 상태 기록 `fn_record_status`(DB 현재 상태와 다를 때만) · 세션 열기/닫기(최신 세션만 통신이상 기록). app_writer 실행 권한 | `18_csms_session.sql` |
+
+세 폴더(`db/migrations` · `db/views` · `db/quality`)의 V 파일을 **파일 이름 순서로 섞어서** 적용합니다 (Flyway 의 여러 위치와 같은 방식). 실습 충전기 등록은 V 체인 밖 `db/seed/lab_chargers.sql` — 실습 · 시연 DB 에만 손으로.
 
 ## 규칙
 
@@ -29,7 +38,7 @@ Primary DB 서버에서 **postgres**(테이블 소유자) 권한으로 실행합
 ```bash
 # ===== 실행할 명령어 =====
 sudo -u postgres createdb chargeops
-for f in db/migrations/V*.sql; do echo "== $f"; sudo -u postgres psql -X -q -d chargeops -v ON_ERROR_STOP=1 < "$f" || break; done
+for f in $(ls db/migrations/V*.sql db/views/V*.sql db/quality/V*.sql | sort -t/ -k3); do echo "== $f"; sudo -u postgres psql -X -q -d chargeops -v ON_ERROR_STOP=1 < "$f" || break; done
 sudo -u postgres psql -d chargeops -Atc "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' AND tablename NOT LIKE '%\_20%' AND tablename NOT LIKE '%default'"
 ```
 
@@ -37,11 +46,19 @@ sudo -u postgres psql -d chargeops -Atc "SELECT count(*) FROM pg_tables WHERE sc
 # ===== 실행 결과 =====
 == db/migrations/V20261013113000__core_tables.sql
 …
-27
+28
 ```
 
 - 파일을 표준입력(`<`)으로 넘겨서, postgres 계정이 내 홈 폴더를 읽을 권한이 없어도 됩니다.
-- 마지막 숫자 27 = 테이블 수입니다 (월 파티션 · default 파티션 제외).
+- 마지막 숫자 28 = 테이블 수입니다 (월 파티션 · default 파티션 제외. `slack_user` 가 더해져 27 → 28).
+- 전제: `pg_cron` 은 `shared_preload_libraries` 와 `cron.database_name` 에 있어야 합니다 (`db/ops/postgresql/chargeops.conf` 에 이미 있음).
+- ⚠ 이미 운영 중인 DB(각자 PC)에는 다시 적용하지 않습니다 — `V…160100` 의 `DROP MATERIALIZED VIEW … CASCADE` 가 관제 화면 뷰까지 지웁니다. 새로 세울 때만.
+- K8s 없이 DB 만으로 돌릴 때만(시뮬레이션) 이상치 · 품질 잡을 DB 예약 작업으로:
+
+```sql
+SELECT cron.schedule($$sim-anomaly$$,  $$* * * * *$$,  $$SELECT fn_detect_anomaly()$$);
+SELECT cron.schedule($$sim-dq-daily$$, $$40 0 * * *$$, $$SELECT fn_dq_check()$$);
+```
 
 ## 비밀번호 설정 (적용한 뒤 사람이 직접)
 
@@ -63,16 +80,6 @@ sudo -u postgres psql -d chargeops
 ```
 
 앱 · 도구 쪽은 각자 `.env`(루트 `.env.example` 양식)나 `~/.pgpass`(권한 600)에 넣습니다.
-
-## 아직 이 폴더에 없는 것
-
-| 무엇 | 어디로 | 담당 (WBS) |
-|---|---|---|
-| 가동률 · MTTR · 운영기관 통계 뷰와 구체화 뷰 (실습 `12_stats.sql`) | `db/views/` | 성주원 · 윤하빈 (3.8) |
-| 이상치 점수 뷰 · 감지 함수 (실습 `13_anomaly_dq.sql` 앞부분) | `db/views/` | 조인성 · 강영수 (3.10) |
-| 데이터 품질 점검 함수 (실습 `13_anomaly_dq.sql` 90줄부터) | `db/quality/` | 조인성 (3.9) |
-| 위 뷰 · 함수의 권한 (`report_ro` 조회, 감지 · 품질 함수 실행) | 각 파일 끝에서 GRANT | 각 담당 |
-| DB 안 예약 작업 (pg_cron: 가동률 10분, 일 통계, 파티션, 장기 방치) | 위 뷰가 들어온 뒤 새 마이그레이션 | 데이터팀 |
 
 ## 팀에서 정한 뒤 새 파일로 바꿀 것
 
