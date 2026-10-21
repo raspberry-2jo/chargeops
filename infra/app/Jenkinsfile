@@ -1,5 +1,5 @@
 pipeline {
-  agent { label 'chargeops-agent' }
+  agent { label 'mgmt-agent' }
   options {
     timestamps()
     disableConcurrentBuilds()
@@ -12,7 +12,7 @@ pipeline {
       description: 'Build all nine images. The first build automatically builds all images.')
   }
   environment {
-    REGISTRY = 'chanjookim'
+    REGISTRY = 'registry.chargeops.lab:5000/chargeops'
     APP_ROOT = 'infra/app'
     PUBLISH_BRANCH = 'dev'
   }
@@ -49,7 +49,7 @@ pipeline {
             CURRENT_COMMIT="$(git rev-parse HEAD)"
             BASE="${GIT_PREVIOUS_SUCCESSFUL_COMMIT:-}"
             if [ -z "$BASE" ] || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
-              printf '%s\\n' '__BUILD_ALL__'
+              printf '%s\n' '__BUILD_ALL__'
             else
               git diff --name-only "$BASE" "$CURRENT_COMMIT" -- "$APP_ROOT/"
             fi
@@ -122,58 +122,45 @@ pipeline {
         }
       }
     }
-    stage('Docker Build: changed images only') {
+    stage('Registry Build and Push: changed images only') {
       when { expression { env.BUILD_IMAGES?.trim() } }
       steps {
         dir(env.APP_ROOT) {
           sh '''
-          set -eu
-          build_if_selected() {
-            NAME="$1"
-            DOCKERFILE="$2"
-            CONTEXT="$3"
-            case " $BUILD_IMAGES " in
-              *" $NAME "*)
-                docker build --pull -f "$DOCKERFILE" \\
-                  -t "$REGISTRY/$NAME:$IMAGE_TAG" "$CONTEXT"
-                ;;
-            esac
-          }
-          build_if_selected chargeops-chatops-bot docker/chatops-bot.Dockerfile .
-          build_if_selected chargeops-alert-router docker/router.Dockerfile .
-          build_if_selected chargeops-mock-csms docker/mock-csms.Dockerfile .
-          build_if_selected chargeops-ai-gateway apps/ai_gateway/Dockerfile apps
-          build_if_selected chargeops-v2-chatops-bot apps/chatops_bot/Dockerfile apps
-          build_if_selected chargeops-v2-csms apps/csms/Dockerfile apps
-          build_if_selected chargeops-v2-notifier apps/notifier/Dockerfile apps
-          build_if_selected chargeops-v2-vcharger apps/vcharger/Dockerfile apps
-          build_if_selected chargeops-v2-collector apps/collector/Dockerfile apps
+            set -eu
+            build_if_selected() {
+              NAME="$1"
+              DOCKERFILE="$2"
+              CONTEXT="$3"
+              case " $BUILD_IMAGES " in
+                *" $NAME "*)
+                  docker build --pull -f "$DOCKERFILE" \
+                    -t "$REGISTRY/$NAME:$IMAGE_TAG" "$CONTEXT"
+                  ;;
+              esac
+            }
+            build_if_selected chargeops-chatops-bot docker/chatops-bot.Dockerfile .
+            build_if_selected chargeops-alert-router docker/router.Dockerfile .
+            build_if_selected chargeops-mock-csms docker/mock-csms.Dockerfile .
+            build_if_selected chargeops-ai-gateway apps/ai_gateway/Dockerfile apps
+            build_if_selected chargeops-v2-chatops-bot apps/chatops_bot/Dockerfile apps
+            build_if_selected chargeops-v2-csms apps/csms/Dockerfile apps
+            build_if_selected chargeops-v2-notifier apps/notifier/Dockerfile apps
+            build_if_selected chargeops-v2-vcharger apps/vcharger/Dockerfile apps
+            build_if_selected chargeops-v2-collector apps/collector/Dockerfile apps
+            if [ "$PUBLISH_IMAGES" = 'true' ]; then
+              for NAME in $BUILD_IMAGES; do
+                docker push "$REGISTRY/$NAME:$IMAGE_TAG"
+                docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$REGISTRY/$NAME:dev"
+                docker push "$REGISTRY/$NAME:dev"
+              done
+            fi
           '''
         }
       }
     }
-    stage('Docker Hub Login and Push') {
-      when { expression { env.BUILD_IMAGES?.trim() && env.PUBLISH_IMAGES == 'true' } }
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'dockerhub-write',
-          usernameVariable: 'DH_USER', passwordVariable: 'DH_TOKEN')]) {
-          sh '''
-            set -eu
-            set +x
-            export DOCKER_CONFIG="$(mktemp -d)"
-            trap 'rm -rf "$DOCKER_CONFIG"' EXIT
-            printf '%s' "$DH_TOKEN" | docker login docker.io -u "$DH_USER" --password-stdin
-            for NAME in $BUILD_IMAGES; do
-              docker push "$REGISTRY/$NAME:$IMAGE_TAG"
-              docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$REGISTRY/$NAME:dev"
-              docker push "$REGISTRY/$NAME:dev"
-            done
-            docker logout docker.io
-            '''
-        }
-      }
-    }
   }
+
   post {
     always {
       dir(env.APP_ROOT) {

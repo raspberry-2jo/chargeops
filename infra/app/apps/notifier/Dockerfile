@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM registry.chargeops.lab:5000/chargeops/python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
