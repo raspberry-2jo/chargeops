@@ -1,5 +1,6 @@
 """Exercise branch-independent selection and the publication command boundary."""
 import importlib.util
+import ast
 import os
 from pathlib import Path
 import subprocess
@@ -23,10 +24,7 @@ spec.loader.exec_module(ci)
     (["apps/virtual-charger/Dockerfile"], {"chargeops-v2-vcharger"}),
     (["apps/notifier/app.py"], {"chargeops-v2-notifier"}),
     (["apps/common/db.py"], ci.COMMON_USERS),
-    (["apps/legacy/app/csms.py"], ci.LEGACY),
-    (["apps/legacy/docker/router.Dockerfile"], {"chargeops-alert-router"}),
-    (["apps/.dockerignore"], ci.MODERN),
-    (["apps/legacy/.dockerignore"], ci.LEGACY),
+    (["apps/.dockerignore"], ci.ALL_IMAGES),
     (["Jenkinsfile"], {image.name for image in ci.IMAGES}),
     (["scripts/ci.py"], {image.name for image in ci.IMAGES}),
 ])
@@ -44,12 +42,12 @@ def test_non_app_changes_do_not_build_or_test_apps():
 
 
 def test_test_only_changes_run_checks_without_republishing_images():
-    assert ci.select_images(["apps/legacy/tests/test_csms.py", "pytest.ini", "requirements-dev.txt"]) == (True, [])
+    assert ci.select_images(["tests/test_ci.py", "pytest.ini", "requirements-dev.txt"]) == (True, [])
 
 
-def test_force_build_and_shared_changes_do_not_duplicate_images():
+def test_force_build_and_multiple_changes_do_not_duplicate_images():
     run_tests, selected = ci.select_images(["apps/common/db.py", "apps/ai-gateway/app.py"], force=True)
-    assert run_tests and len(selected) == len(set(selected)) == 9
+    assert run_tests and len(selected) == len(set(selected)) == 6
 
 
 def test_real_git_diff_handles_renames_and_invalid_previous_commits(tmp_path):
@@ -77,6 +75,30 @@ def test_build_contexts_and_app_syntax_are_valid():
     ci.validate_inputs()
 
 
+@pytest.mark.parametrize("folder", ["ai-gateway", "chatops-bot", "notifier"])
+def test_service_common_imports_are_available_in_the_build_context(folder):
+    source_dir = SCRIPT.parents[1] / "apps" / folder
+    for source in source_dir.glob("*.py"):
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom):
+                if node.module and node.module.startswith("common."):
+                    module = source_dir.parent.joinpath(*node.module.split("."))
+                    assert module.with_suffix(".py").is_file()
+                    assert "COPY common/ ./common/" in (source_dir / "Dockerfile").read_text()
+
+
+def test_bot_policy_preserves_approval_constraints():
+    policy_path = SCRIPT.parents[1] / "apps" / "common" / "policy.py"
+    policy_spec = importlib.util.spec_from_file_location("bot_policy_test", policy_path)
+    policy = importlib.util.module_from_spec(policy_spec)
+    sys.modules[policy_spec.name] = policy
+    policy_spec.loader.exec_module(policy)
+    assert not policy.decide("hard_reset", "Viewer").allowed
+    assert policy.decide("hard_reset", "Lead").approvals_needed == 1
+    assert not policy.can_approve("hard_reset", "Lead", "U1", "U1", []).allowed
+    assert policy.can_approve("hard_reset", "Lead", "U1", "U2", []).allowed
+
+
 def test_publish_builds_everything_before_pushing_immutable_and_dev_tags(monkeypatch):
     calls = []
     monkeypatch.setattr(ci.subprocess, "run", lambda command, **kwargs: calls.append(command))
@@ -91,9 +113,9 @@ def test_publish_builds_everything_before_pushing_immutable_and_dev_tags(monkeyp
 def test_nonpublish_build_never_pushes(monkeypatch):
     calls = []
     monkeypatch.setattr(ci.subprocess, "run", lambda command, **kwargs: calls.append(command))
-    ci.build_images(["chargeops-mock-csms"], "registry.chargeops.lab:5000/chargeops", "build-12-abc", False)
+    ci.build_images(["chargeops-v2-csms"], "registry.chargeops.lab:5000/chargeops", "build-12-abc", False)
     assert len(calls) == 1
-    assert calls[0][1] == "build" and calls[0][-1] == "apps/legacy"
+    assert calls[0][1] == "build" and calls[0][-1] == "apps"
 
 
 def test_build_failure_never_retags_or_pushes(monkeypatch):
@@ -118,10 +140,11 @@ def test_cli_rejects_publication_from_wrong_branch_or_pr(branch, change_id):
     assert "restricted to the configured non-PR branch" in result.stderr
 
 
-def test_unknown_image_is_rejected_before_docker(monkeypatch):
+@pytest.mark.parametrize("name", ["typo", "chargeops-chatops-bot", "chargeops-alert-router", "chargeops-mock-csms"])
+def test_removed_or_unknown_image_is_rejected_before_docker(monkeypatch, name):
     def unexpected_call(*args, **kwargs):
         pytest.fail("Docker must not execute for an unknown image")
 
     monkeypatch.setattr(ci.subprocess, "run", unexpected_call)
     with pytest.raises(ValueError, match="Unknown image"):
-        ci.build_images(["typo"], "registry.chargeops.lab:5000/chargeops", "build-12-abc", True)
+        ci.build_images([name], "registry.chargeops.lab:5000/chargeops", "build-12-abc", True)

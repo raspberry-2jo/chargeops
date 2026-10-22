@@ -1,2 +1,1 @@
--r apps/legacy/requirements.txt
 pytest>=8,<10

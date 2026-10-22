@@ -23,9 +23,6 @@ class Image:
 
 
 IMAGES = (
-    Image("chargeops-chatops-bot", "apps/legacy", "apps/legacy/docker/chatops-bot.Dockerfile", "apps/legacy"),
-    Image("chargeops-alert-router", "apps/legacy", "apps/legacy/docker/router.Dockerfile", "apps/legacy"),
-    Image("chargeops-mock-csms", "apps/legacy", "apps/legacy/docker/mock-csms.Dockerfile", "apps/legacy"),
     Image("chargeops-ai-gateway", "apps/ai-gateway", "apps/ai-gateway/Dockerfile", "apps"),
     Image("chargeops-v2-chatops-bot", "apps/chatops-bot", "apps/chatops-bot/Dockerfile", "apps"),
     Image("chargeops-v2-csms", "apps/csms", "apps/csms/Dockerfile", "apps"),
@@ -33,8 +30,7 @@ IMAGES = (
     Image("chargeops-v2-vcharger", "apps/virtual-charger", "apps/virtual-charger/Dockerfile", "apps"),
     Image("chargeops-v2-collector", "apps/collector", "apps/collector/Dockerfile", "apps"),
 )
-LEGACY = {image.name for image in IMAGES if image.folder == "apps/legacy"}
-MODERN = {image.name for image in IMAGES} - LEGACY
+ALL_IMAGES = {image.name for image in IMAGES}
 COMMON_USERS = {"chargeops-ai-gateway", "chargeops-v2-chatops-bot", "chargeops-v2-notifier"}
 
 
@@ -49,7 +45,7 @@ def select_images(paths: list[str], force: bool = False) -> tuple[bool, list[str
         elif path in {"requirements-dev.txt", "pytest.ini"} or path.startswith("tests/"):
             test_changed = True
         elif path == "apps/.dockerignore":
-            selected.update(MODERN)
+            selected.update(ALL_IMAGES)
         elif path.startswith("apps/common/"):
             selected.update(COMMON_USERS)
         elif path.startswith("apps/"):
@@ -60,12 +56,8 @@ def select_images(paths: list[str], force: bool = False) -> tuple[bool, list[str
             if name.startswith("test_") or "/tests/" in path:
                 test_changed = True
                 continue
-            if path.startswith("apps/legacy/docker/"):
-                match = next((image for image in IMAGES if image.dockerfile == path), None)
-                selected.update({match.name} if match else LEGACY)
-            else:
-                matches = [image.name for image in IMAGES if path.startswith(image.folder + "/")]
-                selected.update(matches or MODERN)
+            matches = [image.name for image in IMAGES if path.startswith(image.folder + "/")]
+            selected.update(matches or ALL_IMAGES)
     return test_changed or bool(selected), [image.name for image in IMAGES if image.name in selected]
 
 
@@ -93,7 +85,7 @@ def validate_inputs(root: Path = ROOT) -> None:
         for line in dockerfile.read_text(encoding="utf-8").splitlines():
             if line.startswith("FROM "):
                 if not re.fullmatch(
-                    r"FROM registry\.chargeops\.lab:5000/chargeops/python:3\.(12|13)-slim", line,
+                    r"FROM registry\.chargeops\.lab:5000/chargeops/python:3\.13-slim", line,
                 ):
                     raise ValueError(f"Unexpected base image in {image.dockerfile}: {line}")
             if line.startswith("COPY "):
@@ -147,7 +139,7 @@ def main() -> None:
         print(" ".join(selected))
     elif args.command == "validate":
         validate_inputs()
-        print("Nine Docker build contexts, COPY inputs, and app Python syntax validated.")
+        print(f"{len(IMAGES)} Docker build contexts, COPY inputs, and app Python syntax validated.")
     else:
         validate_inputs()
         publish = os.environ.get("PUBLISH_IMAGES") == "true"

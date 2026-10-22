@@ -19,7 +19,6 @@
 /deploy/                    @raspberry-2jo/infra-team
 /monitoring/                @raspberry-2jo/infra-team
 /Jenkinsfile                @raspberry-2jo/infra-team
-/apps/legacy/               @raspberry-2jo/infra-team
 /scripts/ci.py              @raspberry-2jo/infra-team
 
 # ----- 데이터 -----

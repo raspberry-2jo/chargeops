@@ -10,7 +10,7 @@ pipeline {
   triggers { pollSCM('H/5 * * * *') }
   parameters {
     booleanParam(name: 'BUILD_ALL_IMAGES', defaultValue: false,
-      description: 'Build all nine images. The first build automatically builds all images.')
+      description: 'Build all six images. The first build automatically builds all images.')
   }
   environment {
     REGISTRY = 'registry.chargeops.lab:5000/chargeops'
