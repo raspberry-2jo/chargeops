@@ -13,6 +13,8 @@ pipeline {
       description: 'Build all six images. The first build automatically builds all images.')
     booleanParam(name: 'ENABLE_ENVIRONMENT_CD', defaultValue: false,
       description: 'After bootstrap: deploy CSMS to dev, verify, then wait for admin approval to update ops GitOps. Ops Sync remains manual.')
+    booleanParam(name: 'ENABLE_CANARY', defaultValue: false,
+      description: 'After bootstrap-canary.py: approved CSMS promotion automatically Syncs ops through 25/50/100 percent Pod canary and restores Git on failure.')
     booleanParam(name: 'RUN_OCPP_FIXTURE_TEST', defaultValue: false,
       description: 'Optional: OCPP checks WRITE to the existing DB using a pre-approved CI-DEV charger. Default verification is read-only.')
     booleanParam(name: 'PUBLISH_DEV_TAG', defaultValue: false,
@@ -21,6 +23,8 @@ pipeline {
       description: 'Jenkins username/password credential for GitOps Git access.')
     string(name: 'DEV_KUBECONFIG_CREDENTIAL_ID', defaultValue: 'chargeops-dev-kubeconfig',
       description: 'Jenkins secret-file kubeconfig limited to dev verification and chargeops-dev Application reads.')
+    string(name: 'CANARY_KUBECONFIG_CREDENTIAL_ID', defaultValue: 'chargeops-canary-kubeconfig',
+      description: 'Restricted Secret file from bootstrap-canary.py: ops rollout observation, abort and the existing ops Application Sync.')
   }
   environment {
     REGISTRY = 'registry.chargeops.lab:5000/chargeops'
@@ -116,6 +120,7 @@ pipeline {
           python3.12 -m venv .ci-venv
           .ci-venv/bin/python -m pip install --upgrade pip
           .ci-venv/bin/python -m pip install -r requirements-dev.txt
+          .ci-venv/bin/python scripts/env_cd.py reset
           .ci-venv/bin/python -m pytest -q tests/
           python3.12 scripts/ci.py validate
         '''
@@ -196,7 +201,9 @@ pipeline {
               command -v kubectl
               OCPP_OPTION=''
               if [ "$RUN_OCPP_FIXTURE_TEST" = 'true' ]; then OCPP_OPTION='--ocpp-fixture-test'; fi
-              .ci-venv/bin/python scripts/env_cd.py prepare --tag "$IMAGE_TAG" --source "$(git rev-parse HEAD)" $OCPP_OPTION
+              CANARY_OPTION=''
+              if [ "$ENABLE_CANARY" = 'true' ]; then CANARY_OPTION='--canary'; fi
+              .ci-venv/bin/python scripts/env_cd.py prepare --tag "$IMAGE_TAG" --source "$(git rev-parse HEAD)" $OCPP_OPTION $CANARY_OPTION
               .ci-venv/bin/python scripts/env_cd.py verify
             '''
           }
@@ -214,7 +221,8 @@ pipeline {
         script {
           def candidateImage = sh(script: '.ci-venv/bin/python scripts/env_cd.py describe', returnStdout: true).trim()
           timeout(time: 30, unit: 'MINUTES') {
-            def approver = input(message: 'Dev integration checks passed. Promote ' + candidateImage + ' to ops GitOps? Ops Argo CD Sync is still manual.',
+            def deliveryMode = params.ENABLE_CANARY ? 'Start ops Canary with automatic metric checks and recovery.' : 'Ops Argo CD Sync is still manual.'
+            def approver = input(message: 'Dev integration checks passed. Promote ' + candidateImage + ' to ops GitOps? ' + deliveryMode,
               ok: 'Approve ops GitOps update', submitter: 'admin', submitterParameter: 'APPROVER')
             echo 'Production GitOps update approved by ' + approver
           }
@@ -229,6 +237,14 @@ pipeline {
         }
       }
       steps {
+        script {
+          if (params.ENABLE_CANARY) {
+            withCredentials([file(credentialsId: params.CANARY_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG'),
+              usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+              sh '.ci-venv/bin/python scripts/canary_cd.py preflight'
+            }
+          }
+        }
         withCredentials([
           usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(),
             usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD'),
@@ -236,16 +252,43 @@ pipeline {
         ]) {
           sh '''
             set -eu
-            .ci-venv/bin/python scripts/env_cd.py promote
+            CANARY_OPTION=''
+            if [ "$ENABLE_CANARY" = 'true' ]; then CANARY_OPTION='--canary'; fi
+            .ci-venv/bin/python scripts/env_cd.py promote $CANARY_OPTION
           '''
+        }
+        script {
+          if (params.ENABLE_CANARY) {
+            stage('Ops Canary and automatic recovery') {
+              withCredentials([file(credentialsId: params.CANARY_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG'),
+                usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+                timeout(time: 30, unit: 'MINUTES') {
+                  sh '.ci-venv/bin/python scripts/canary_cd.py run'
+                }
+              }
+            }
+          }
         }
       }
     }
   }
   post {
     always {
-      archiveArtifacts artifacts: 'artifacts/candidate.json,artifacts/verification.json', allowEmptyArchive: true, fingerprint: true
-      sh 'rm -rf .ci-venv || true'
+      script {
+        try {
+          if (params.ENABLE_CANARY && fileExists('.ci-venv/bin/python') && fileExists('artifacts/production-delivery.json')) {
+            withCredentials([file(credentialsId: params.CANARY_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG'),
+              usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+              timeout(time: 15, unit: 'MINUTES') {
+                sh '.ci-venv/bin/python scripts/canary_cd.py recover'
+              }
+            }
+          }
+        } finally {
+          archiveArtifacts artifacts: 'artifacts/candidate.json,artifacts/verification.json,artifacts/production-delivery.json', allowEmptyArchive: true, fingerprint: true
+          sh 'rm -rf .ci-venv || true'
+        }
+      }
     }
     success {
       echo 'CI completed: ' + (env.BUILD_IMAGES ?: '(no image changes)') + ' : ' + env.IMAGE_TAG

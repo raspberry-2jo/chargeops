@@ -57,16 +57,20 @@ def repo(tmp_path):
             'apiVersion': 'kustomize.config.k8s.io/v1beta1', 'kind': 'Kustomization',
             'namespace': namespace, 'resources': ['deployment.yaml'],
             'images': [{'name': cd.IMAGE, 'newName': cd.IMAGE, 'digest': 'sha256:' + 'a' * 64}]}))
+    canary = work / cd.CANARY
+    canary.mkdir(parents=True)
+    (canary / 'kustomization.yaml').write_text(yaml.safe_dump({
+        'apiVersion': 'kustomize.config.k8s.io/v1beta1', 'kind': 'Kustomization', 'resources': ['../prod']}))
     git('add', '.', cwd=work)
     git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'initial', cwd=work)
     git('push', '-qu', 'origin', 'main', cwd=work)
     return work
 
 
-def prepared(repo, tmp_path, monkeypatch):
+def prepared(repo, tmp_path, monkeypatch, canary=False):
     monkeypatch.setattr(cd, 'resolve_digest', lambda reference: B)
     candidate = tmp_path / 'candidate.json'
-    cd.prepare(repo, 'build-15-abcdef012345', 'c' * 40, candidate)
+    cd.prepare(repo, 'build-15-abcdef012345', 'c' * 40, candidate, canary=canary)
     return candidate
 
 
@@ -117,7 +121,7 @@ def test_promotion_uses_verified_digest_without_registry_lookup(repo, tmp_path, 
     monkeypatch.setattr(cd, 'resolve_digest', lambda reference: pytest.fail('Promotion must not resolve a mutable tag'))
     monkeypatch.setattr(cd, 'live_candidate', lambda image: image == B)
     monkeypatch.setattr(cd, 'kubectl', lambda *args: {'metadata': {'uid': 'test-job-uid'}, 'status': {'succeeded': 1}})
-    cd.promote(repo, candidate, receipt)
+    cd.promote(repo, candidate, receipt, tmp_path / 'production-delivery.json')
     assert cd.csms_image(repo, cd.PROD) == B
     assert cd.csms_image(repo, cd.DEV) == B
     assert cd.run('git', 'diff', '--name-only', 'HEAD~1', 'HEAD', cwd=repo) == cd.PROD + '/kustomization.yaml'

@@ -1,6 +1,6 @@
-"""CSMS-only development delivery and receipt-bound production promotion.
+"""CSMS development delivery and receipt-bound production Git promotion.
 
-No kubectl writes to ops. Production remains manually synced in Argo CD.
+No kubectl writes to ops here. Optional Canary Sync is handled by canary_cd.py.
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ REGISTRY = 'registry.chargeops.lab:5000'
 IMAGE = REGISTRY + '/chargeops/chargeops-csms'
 DEV = 'chargeops-chatops/overlays/development'
 PROD = 'chargeops-chatops/overlays/prod'
+CANARY = 'chargeops-chatops/overlays/canary'
 APPLICATION = 'chargeops-dev'
 
 
@@ -169,7 +170,7 @@ def candidate_check(candidate):
         raise DeliveryPreflightError('Unknown verification mode')
 
 
-def prepare(repo, tag, source, output, ocpp_fixture_test=False):
+def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False):
     if not re.fullmatch(r'build-[0-9]+-[a-f0-9]{12}', tag):
         raise DeliveryPreflightError('Only a unique build tag may identify a candidate')
     if not re.fullmatch(r'[a-f0-9]{40}', source):
@@ -182,6 +183,8 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False):
     candidate = {'schema': 1, 'source': source, 'image': resolve_digest(IMAGE + ':' + tag),
                  'verification_mode': 'ocpp-fixture' if ocpp_fixture_test else 'read-only',
                  'production_fingerprint': before, 'previous_production_image': prod_image}
+    if canary:
+        candidate['canary_fingerprint'] = fingerprint(rendered(repo, CANARY))
     pin_image(repo, DEV, candidate['image'])
     if production_fingerprint(repo) != before:
         raise DeliveryPreflightError('Development update changed production')
@@ -274,43 +277,66 @@ def validate_receipt(candidate, receipt, now):
         raise DeliveryPreflightError('Verification is expired; run a new development test')
 
 
-def promote(repo, candidate_path, receipt_path):
+def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/production-delivery.json', canary=False):
     candidate, receipt = load(candidate_path), load(receipt_path)
     validate_receipt(candidate, receipt, int(time.time()))
     ensure_clean(repo)
     if production_fingerprint(repo) != candidate['production_fingerprint']:
         raise DeliveryPreflightError('Production changed while approval was pending')
+    if canary and candidate.get('canary_fingerprint') != fingerprint(rendered(repo, CANARY)):
+        raise DeliveryPreflightError('Canary policy changed or was not included in development verification')
     if (fingerprint(rendered(repo, DEV)) != candidate['development_fingerprint']
             or csms_image(repo, DEV) != candidate['image'] or not live_candidate(candidate['image'])):
         raise DeliveryPreflightError('Development no longer runs the verified candidate')
     job = kubectl('-n', 'dev', 'get', 'job', receipt['job'])
     if job['metadata']['uid'] != receipt['job_uid'] or job.get('status', {}).get('succeeded') != 1:
         raise DeliveryPreflightError('Successful verification job is missing or replaced')
+    delivery = {'schema': 1, 'candidate': fingerprint(candidate), 'image': candidate['image'],
+                'previous_image': candidate['previous_production_image'], 'phase': 'prepared', 'canary': canary}
+    save(delivery_path, delivery)
     dev_before = rendered(repo, DEV)
     pin_image(repo, PROD, candidate['image'])
     if rendered(repo, DEV) != dev_before:
         raise DeliveryPreflightError('Production promotion changed development')
     revision = commit(repo, PROD, f'promote(ops): verified CSMS {candidate["source"][:12]}')
-    print(f'Approved digest committed at {revision}; manual Argo CD ops Sync is required')
+    delivery.update(revision=revision, phase='pending', production_fingerprint=production_fingerprint(repo))
+    if canary:
+        delivery['canary_fingerprint'] = fingerprint(rendered(repo, CANARY))
+    save(delivery_path, delivery)
+    print(f'Approved digest committed at {revision}; ' + ('Canary Sync is ready' if canary else 'manual Argo CD ops Sync is required'))
+
+
+def reset_artifacts():
+    path = Path('artifacts/production-delivery.json')
+    if path.exists():
+        delivery = load(path)
+        if delivery.get('canary') and delivery.get('phase') not in ['succeeded', 'recovered']:
+            raise DeliveryPreflightError('Unfinished Canary recovery exists. Run canary_cd.py recover before starting a new build; its receipt was preserved')
+    for name in ['candidate.json', 'verification.json', 'production-delivery.json']:
+        (Path('artifacts') / name).unlink(missing_ok=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['prepare', 'verify', 'promote', 'describe'])
+    parser.add_argument('command', choices=['prepare', 'verify', 'promote', 'describe', 'reset'])
     parser.add_argument('--repo', default='.gitops-delivery')
     parser.add_argument('--candidate', default='artifacts/candidate.json')
     parser.add_argument('--receipt', default='artifacts/verification.json')
+    parser.add_argument('--delivery', default='artifacts/production-delivery.json')
     parser.add_argument('--tag')
     parser.add_argument('--source')
     parser.add_argument('--timeout', type=int, default=600)
     parser.add_argument('--ocpp-fixture-test', action='store_true')
+    parser.add_argument('--canary', action='store_true')
     args = parser.parse_args()
     if args.command == 'prepare':
-        prepare(args.repo, args.tag or '', args.source or '', args.candidate, args.ocpp_fixture_test)
+        prepare(args.repo, args.tag or '', args.source or '', args.candidate, args.ocpp_fixture_test, args.canary)
     elif args.command == 'verify':
         verify(args.repo, args.candidate, args.receipt, args.timeout)
     elif args.command == 'promote':
-        promote(args.repo, args.candidate, args.receipt)
+        promote(args.repo, args.candidate, args.receipt, args.delivery, args.canary)
+    elif args.command == 'reset':
+        reset_artifacts()
     else:
         candidate = load(args.candidate)
         candidate_check(candidate)
