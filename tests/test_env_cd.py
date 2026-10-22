@@ -86,6 +86,30 @@ def test_development_commit_never_changes_production(repo, tmp_path, monkeypatch
     assert files == [cd.DEV + '/kustomization.yaml']
 
 
+def test_uncommitted_bootstrap_stops_before_registry_or_dev_change(repo, tmp_path, monkeypatch):
+    path = repo / cd.PROD / 'kustomization.yaml'
+    config = yaml.safe_load(path.read_text())
+    config['images'][0].pop('digest')
+    config['images'][0]['newTag'] = 'dev'
+    path.write_text(yaml.safe_dump(config))
+    cd.run('git', 'add', '.', cwd=repo)
+    cd.run('git', '-c', 'core.hooksPath=/dev/null', 'commit', '-m', 'unpinned bootstrap fixture', cwd=repo)
+    cd.run('git', 'push', 'origin', 'main', cwd=repo)
+    monkeypatch.setattr(cd, 'resolve_digest', lambda reference: pytest.fail('Unpinned production must stop before Registry access'))
+    with pytest.raises(cd.DeliveryPreflightError, match='commit and push'):
+        cd.prepare(repo, 'build-10-d0a911b838e8', 'c' * 40, tmp_path / 'candidate.json')
+    assert cd.csms_image(repo, cd.DEV) == A
+    assert not (tmp_path / 'candidate.json').exists()
+
+
+def test_cli_explains_fixed_validation_failure():
+    result = subprocess.run([sys.executable, str(ROOT / 'scripts/env_cd.py'), 'prepare', '--tag', 'invalid', '--source', 'c' * 40],
+                            cwd=ROOT, text=True, capture_output=True)
+    assert result.returncode == 1
+    assert 'Only a unique build tag may identify a candidate' in result.stdout
+    assert 'Traceback' not in result.stderr
+
+
 def test_promotion_uses_verified_digest_without_registry_lookup(repo, tmp_path, monkeypatch):
     candidate = prepared(repo, tmp_path, monkeypatch)
     receipt = tmp_path / 'receipt.json'

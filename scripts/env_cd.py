@@ -25,6 +25,10 @@ PROD = 'chargeops-chatops/overlays/prod'
 APPLICATION = 'chargeops-dev'
 
 
+class DeliveryPreflightError(ValueError):
+    """Fixed local validation messages safe for the Jenkins console."""
+
+
 class RegistryLookupError(RuntimeError):
     """Safe connection diagnostics without response bodies or credentials."""
 
@@ -84,14 +88,14 @@ def csms_image(repo, overlay):
 def resolve_digest(reference):
     """Read a registry manifest and validate the server digest against its bytes."""
     if not reference.startswith(REGISTRY + '/chargeops/'):
-        raise ValueError('Image must be in the ChargeOps registry')
+        raise DeliveryPreflightError('Image must be in the ChargeOps registry')
     if '@' in reference:
         repo, tag = reference.split('@', 1)
     else:
         repo, tag = reference.rsplit(':', 1)
     path = repo.removeprefix(REGISTRY + '/')
     if not re.fullmatch(r'[a-z0-9/._-]+', path) or not re.fullmatch(r'[A-Za-z0-9._:-]+', tag):
-        raise ValueError('Invalid registry reference')
+        raise DeliveryPreflightError('Invalid registry reference')
     request = Request(f'https://{REGISTRY}/v2/{path}/manifests/{tag}', headers={
         'Accept': ', '.join(['application/vnd.oci.image.index.v1+json',
                             'application/vnd.docker.distribution.manifest.list.v2+json',
@@ -108,13 +112,13 @@ def resolve_digest(reference):
             raise RegistryLookupError('Registry TLS certificate verification failed. Configure CHARGEOPS_REGISTRY_CA or the Docker registry CA file on mgmt-agent.') from None
         raise RegistryLookupError('Cannot reach the HTTPS Registry. Check DNS and port 5000 on mgmt-agent.') from None
     if digest != 'sha256:' + hashlib.sha256(body).hexdigest():
-        raise ValueError('Registry digest is missing or does not match the manifest')
+        raise DeliveryPreflightError('Registry digest is missing or does not match the manifest')
     return repo + '@' + digest
 
 
 def pin_image(repo, overlay, reference):
     if not re.fullmatch(re.escape(IMAGE) + r'@sha256:[a-f0-9]{64}', reference):
-        raise ValueError('Only a pinned CSMS candidate may be promoted')
+        raise DeliveryPreflightError('Only a pinned CSMS candidate may be promoted')
     path = Path(repo) / overlay / 'kustomization.yaml'
     data = yaml.safe_load(path.read_text(encoding='utf-8'))
     image = next(i for i in data['images'] if i['name'] == IMAGE)
@@ -125,9 +129,9 @@ def pin_image(repo, overlay, reference):
 
 def ensure_clean(repo):
     if run('git', 'status', '--porcelain', cwd=repo):
-        raise ValueError('GitOps checkout must be clean')
+        raise DeliveryPreflightError('GitOps checkout must be clean')
     if run('git', 'branch', '--show-current', cwd=repo) != 'main':
-        raise ValueError('GitOps checkout must be on main')
+        raise DeliveryPreflightError('GitOps checkout must be on main')
     run('git', 'pull', '--ff-only', 'origin', 'main', cwd=repo, env=git_environment(repo))
 
 
@@ -148,7 +152,7 @@ def commit(repo, overlay, message):
     allowed = overlay + '/kustomization.yaml'
     changed = run('git', 'diff', '--name-only', cwd=repo).splitlines()
     if set(changed) - {allowed}:
-        raise ValueError('Delivery may change only its environment image file')
+        raise DeliveryPreflightError('Delivery may change only its environment image file')
     if changed:
         run('git', 'add', '--', allowed, cwd=repo)
         run('git', '-c', 'user.name=ChargeOps CI', '-c', 'user.email=chargeops-ci@example.invalid',
@@ -160,27 +164,27 @@ def commit(repo, overlay, message):
 def candidate_check(candidate):
     if candidate.get('schema') != 1 or not re.fullmatch(
             re.escape(IMAGE) + r'@sha256:[a-f0-9]{64}', candidate.get('image', '')):
-        raise ValueError('Invalid CSMS candidate')
+        raise DeliveryPreflightError('Invalid CSMS candidate')
     if candidate.get('verification_mode', 'read-only') not in ['read-only', 'ocpp-fixture']:
-        raise ValueError('Unknown verification mode')
+        raise DeliveryPreflightError('Unknown verification mode')
 
 
 def prepare(repo, tag, source, output, ocpp_fixture_test=False):
     if not re.fullmatch(r'build-[0-9]+-[a-f0-9]{12}', tag):
-        raise ValueError('Only a unique build tag may identify a candidate')
+        raise DeliveryPreflightError('Only a unique build tag may identify a candidate')
     if not re.fullmatch(r'[a-f0-9]{40}', source):
-        raise ValueError('Source must be a full Git commit')
+        raise DeliveryPreflightError('Source must be a full Git commit')
     ensure_clean(repo)
     before = production_fingerprint(repo)
     prod_image = csms_image(repo, PROD)
     if '@sha256:' not in prod_image:
-        raise ValueError('Freeze the production CSMS digest with the bootstrap procedure first')
+        raise DeliveryPreflightError('Production CSMS is not digest-pinned in GitOps. Run freeze-production.py on mgmt, then commit and push overlays/prod/kustomization.yaml before retrying')
     candidate = {'schema': 1, 'source': source, 'image': resolve_digest(IMAGE + ':' + tag),
                  'verification_mode': 'ocpp-fixture' if ocpp_fixture_test else 'read-only',
                  'production_fingerprint': before, 'previous_production_image': prod_image}
     pin_image(repo, DEV, candidate['image'])
     if production_fingerprint(repo) != before:
-        raise ValueError('Development update changed production')
+        raise DeliveryPreflightError('Development update changed production')
     candidate['development_fingerprint'] = fingerprint(rendered(repo, DEV))
     candidate['development_revision'] = commit(repo, DEV, f'build(dev): verify CSMS {tag}')
     save(output, candidate)
@@ -236,14 +240,14 @@ def verify(repo, candidate_path, receipt_path, timeout):
     candidate_check(candidate)
     ensure_clean(repo)
     if fingerprint(rendered(repo, DEV)) != candidate['development_fingerprint']:
-        raise ValueError('Development configuration changed before verification')
+        raise DeliveryPreflightError('Development configuration changed before verification')
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if live_candidate(candidate['image']):
             break
         time.sleep(5)
     else:
-        raise ValueError('Development did not converge to the exact candidate')
+        raise DeliveryPreflightError('Development did not converge to the exact candidate')
     job = verification_job(candidate)
     name = job['metadata']['name']
     run('kubectl', 'create', '-f', '-', payload=json.dumps(job))
@@ -251,10 +255,10 @@ def verify(repo, candidate_path, receipt_path, timeout):
     result = kubectl('-n', 'dev', 'get', 'job', name)
     print(run('kubectl', '-n', 'dev', 'logs', f'job/{name}', '--all-containers=true'))
     if not live_candidate(candidate['image']):
-        raise ValueError('Development changed during verification')
+        raise DeliveryPreflightError('Development changed during verification')
     ensure_clean(repo)
     if fingerprint(rendered(repo, DEV)) != candidate['development_fingerprint']:
-        raise ValueError('Development configuration changed during verification')
+        raise DeliveryPreflightError('Development configuration changed during verification')
     save(receipt_path, {'candidate': fingerprint(candidate), 'image': candidate['image'],
                         'job': name, 'job_uid': result['metadata']['uid'],
                         'verified_at': int(time.time())})
@@ -264,10 +268,10 @@ def verify(repo, candidate_path, receipt_path, timeout):
 def validate_receipt(candidate, receipt, now):
     candidate_check(candidate)
     if receipt.get('candidate') != fingerprint(candidate) or receipt.get('image') != candidate['image']:
-        raise ValueError('Verification receipt belongs to a different candidate')
+        raise DeliveryPreflightError('Verification receipt belongs to a different candidate')
     age = now - receipt.get('verified_at', 0)
     if age < 0 or age > 7200:
-        raise ValueError('Verification is expired; run a new development test')
+        raise DeliveryPreflightError('Verification is expired; run a new development test')
 
 
 def promote(repo, candidate_path, receipt_path):
@@ -275,17 +279,17 @@ def promote(repo, candidate_path, receipt_path):
     validate_receipt(candidate, receipt, int(time.time()))
     ensure_clean(repo)
     if production_fingerprint(repo) != candidate['production_fingerprint']:
-        raise ValueError('Production changed while approval was pending')
+        raise DeliveryPreflightError('Production changed while approval was pending')
     if (fingerprint(rendered(repo, DEV)) != candidate['development_fingerprint']
             or csms_image(repo, DEV) != candidate['image'] or not live_candidate(candidate['image'])):
-        raise ValueError('Development no longer runs the verified candidate')
+        raise DeliveryPreflightError('Development no longer runs the verified candidate')
     job = kubectl('-n', 'dev', 'get', 'job', receipt['job'])
     if job['metadata']['uid'] != receipt['job_uid'] or job.get('status', {}).get('succeeded') != 1:
-        raise ValueError('Successful verification job is missing or replaced')
+        raise DeliveryPreflightError('Successful verification job is missing or replaced')
     dev_before = rendered(repo, DEV)
     pin_image(repo, PROD, candidate['image'])
     if rendered(repo, DEV) != dev_before:
-        raise ValueError('Production promotion changed development')
+        raise DeliveryPreflightError('Production promotion changed development')
     revision = commit(repo, PROD, f'promote(ops): verified CSMS {candidate["source"][:12]}')
     print(f'Approved digest committed at {revision}; manual Argo CD ops Sync is required')
 
@@ -317,6 +321,9 @@ if __name__ == '__main__':
     try:
         main()
     except RegistryLookupError as error:
+        print(f'Delivery stopped: {error}')
+        raise SystemExit(1)
+    except DeliveryPreflightError as error:
         print(f'Delivery stopped: {error}')
         raise SystemExit(1)
     except Exception as error:
