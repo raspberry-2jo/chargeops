@@ -22,7 +22,7 @@ checkout 위치는 저장소 루트이므로, 테스트와 Docker 빌드는 `dir
 | 앱 밖 변경 | 이미지 빌드와 앱 테스트 생략. 첫 실행/전체 빌드 요청은 예외 |
 | 테스트 | `infra/app/requirements*.txt` 설치 후 `infra/app/tests/` 실행 |
 | 레거시 이미지 3개 | Dockerfile `infra/app/docker/*`, 빌드 context `infra/app` |
-| v2 이미지 6개 | Dockerfile `infra/app/apps/*`, 빌드 context `infra/app/apps` |
+| 이미지 6개 | Dockerfile `infra/app/apps/*`, 빌드 context `infra/app/apps` |
 | 레지스트리 | 기존 `chanjookim/*`와 `dev`, `build-*` 태그 유지 |
 | 이미지 Push | `PUBLISH_BRANCH = 'dev'`와 checkout 브랜치가 일치하고 PR 빌드가 아닐 때만 수행 |
 | kim_chanju/PR 빌드 | 테스트와 로컬 Docker build만 수행. dev 태그 생성과 Docker Hub Push는 수행하지 않음 |

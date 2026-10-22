@@ -15,4 +15,4 @@ USER 10001:10001
 
 EXPOSE 8081
 ENTRYPOINT ["python", "vcharger.py"]
-CMD ["--url", "ws://csms-v2:9000/ocpp", "--ids", "CH-01", "--ramp", "1", "--control-port", "8081"]
+CMD ["--url", "ws://csms:9000/ocpp", "--ids", "CH-01", "--ramp", "1", "--control-port", "8081"]

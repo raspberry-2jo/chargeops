@@ -1,95 +1,157 @@
-"""Exercise branch-independent selection and the publication command boundary."""
-import importlib.util
+"""Run the actual Jenkins shell blocks with a Docker stub and real temporary Git repos."""
 import ast
+import importlib.util
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 
 import pytest
 
-
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "ci.py"
-spec = importlib.util.spec_from_file_location("chargeops_ci", SCRIPT)
+ROOT = Path(__file__).resolve().parents[1]
+PIPELINE = (ROOT / "Jenkinsfile").read_text(encoding="utf-8")
+BLOCKS = re.findall(r"sh(?:\(script:)?\s*'''(.*?)'''", PIPELINE, re.DOTALL)
+BUILD = next(block for block in BLOCKS if "build_if_selected()" in block)
+DIFF = next(block for block in BLOCKS if "GIT_PREVIOUS_SUCCESSFUL_COMMIT" in block)
+spec = importlib.util.spec_from_file_location("ci_validator", ROOT / "scripts" / "ci.py")
 ci = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = ci
 spec.loader.exec_module(ci)
+IMAGES = ci.image_definitions()
 
 
-@pytest.mark.parametrize("paths,expected", [
-    (["apps/ai-gateway/health.py"], {"chargeops-ai-gateway"}),
-    (["apps/csms/app.py"], {"chargeops-v2-csms"}),
-    (["apps/collector/collector_v1.py"], {"chargeops-v2-collector"}),
-    (["apps/chatops-bot/requirements.txt"], {"chargeops-v2-chatops-bot"}),
-    (["apps/virtual-charger/Dockerfile"], {"chargeops-v2-vcharger"}),
-    (["apps/notifier/app.py"], {"chargeops-v2-notifier"}),
-    (["apps/common/db.py"], ci.COMMON_USERS),
-    (["apps/.dockerignore"], ci.ALL_IMAGES),
-    (["Jenkinsfile"], {image.name for image in ci.IMAGES}),
-    (["scripts/ci.py"], {image.name for image in ci.IMAGES}),
-])
-def test_runtime_changes_select_their_consumers(paths, expected):
-    run_tests, selected = ci.select_images(paths)
-    assert run_tests
-    assert set(selected) == expected
+@pytest.fixture(scope="module")
+def bash():
+    windows_bash = Path("C:/Program Files/Git/bin/bash.exe")
+    executable = str(windows_bash) if os.name == "nt" and windows_bash.exists() else shutil.which("bash")
+    if not executable:
+        pytest.skip("Bash is required to execute Jenkins shell checks")
+    return executable
 
 
-def test_non_app_changes_do_not_build_or_test_apps():
-    assert ci.select_images([
-        "docs/infra/root-app-cicd.md", "db/migrations/new.sql", "infra/ansible/patroni.yml",
-        "infra/app/apps/csms/app.py", "apps/collector/check_queries.sql",
-    ]) == (False, [])
+def build_with_stub(bash, tmp_path, names, publish=True, branch="kim_chanju", change_id="", fail=False):
+    log = tmp_path / "docker-calls.txt"
+    env = os.environ.copy()
+    env.update(CALL_LOG=log.as_posix(), BUILD_IMAGES=" ".join(names),
+               REGISTRY="registry.chargeops.lab:5000/chargeops", IMAGE_TAG="build-12-abc",
+               PUBLISH_IMAGES=str(publish).lower(), PUBLISH_BRANCH="kim_chanju",
+               CHECKOUT_BRANCH=branch, CHANGE_ID=change_id, FAIL_BUILD=str(int(fail)))
+    stub = '''docker() {
+      printf '%s\t' "$@" >> "$CALL_LOG"
+      printf '\n' >> "$CALL_LOG"
+      if [ "$1" = build ] && [ "$FAIL_BUILD" = 1 ]; then return 31; fi
+    }
+'''
+    result = subprocess.run([bash], input=stub + BUILD, cwd=ROOT, env=env, text=True, capture_output=True)
+    calls = [line.rstrip("\t").split("\t") for line in log.read_text().splitlines()] if log.exists() else []
+    return result, calls
 
 
-def test_test_only_changes_run_checks_without_republishing_images():
-    assert ci.select_images(["tests/test_ci.py", "pytest.ini", "requirements-dev.txt"]) == (True, [])
-
-
-def test_force_build_and_multiple_changes_do_not_duplicate_images():
-    run_tests, selected = ci.select_images(["apps/common/db.py", "apps/ai-gateway/app.py"], force=True)
-    assert run_tests and len(selected) == len(set(selected)) == 6
-
-
-def test_real_git_diff_handles_renames_and_invalid_previous_commits(tmp_path):
-    def git(*args):
-        return subprocess.check_output(["git", *args], cwd=tmp_path, text=True).strip()
-
-    git("init", "-q")
-    git("config", "user.name", "CI test")
-    git("config", "user.email", "ci-test@example.invalid")
-    source = tmp_path / "apps" / "ai-gateway"
-    source.mkdir(parents=True)
-    (source / "health.py").write_text("marker = 'old'\n")
-    git("add", ".")
-    git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "initial")
-    base = git("rev-parse", "HEAD")
-    (source / "health.py").rename(source / "probe.py")
-    git("add", "-A")
-    git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "rename")
-    assert set(ci.changed_paths(base, tmp_path)) == {"apps/ai-gateway/health.py", "apps/ai-gateway/probe.py"}
-    assert ci.changed_paths("missing-commit", tmp_path) is None
-    assert ci.changed_paths("", tmp_path) is None
+def test_shell_blocks_have_valid_syntax(bash):
+    assert len(BLOCKS) == 4
+    for block in BLOCKS:
+        subprocess.run([bash, "-n"], input=block, text=True, check=True)
 
 
 def test_build_contexts_and_app_syntax_are_valid():
     ci.validate_inputs()
 
 
+def test_groovy_image_map_matches_actual_build_declarations():
+    mappings = dict(re.findall(r"'([^']+)': '(chargeops[^']+)'", PIPELINE))
+    assert len(mappings) == 6
+    assert set(mappings.values()) == {image.name for image in IMAGES}
+    for folder, image in mappings.items():
+        assert next(item for item in IMAGES if item.name == image).dockerfile == f"apps/{folder}/Dockerfile"
+    assert "APP_ROOT = 'apps'" in PIPELINE
+    assert "PUBLISH_BRANCH = 'kim_chanju'" in PIPELINE
+    assert "!env.CHANGE_ID" in PIPELINE
+
+
+@pytest.mark.parametrize("image", IMAGES, ids=lambda image: image.name)
+def test_each_service_builds_only_its_dockerfile(bash, tmp_path, image):
+    result, calls = build_with_stub(bash, tmp_path, [image.name], publish=False)
+    assert result.returncode == 0, result.stderr
+    assert len(calls) == 1
+    assert calls[0][:2] == ["build", "--pull"]
+    assert calls[0][calls[0].index("-f") + 1] == image.dockerfile
+    assert calls[0][-1] == "apps"
+
+
+def test_all_builds_finish_before_any_image_is_published(bash, tmp_path):
+    result, calls = build_with_stub(bash, tmp_path, [image.name for image in IMAGES])
+    assert result.returncode == 0, result.stderr
+    assert [call[0] for call in calls] == ["build"] * 6 + ["push"] * 6 + ["tag", "push"] * 6
+    assert all(call[-1].startswith("registry.chargeops.lab:5000/chargeops/") for call in calls[6:])
+
+
+def test_build_failure_prevents_all_pushes(bash, tmp_path):
+    result, calls = build_with_stub(bash, tmp_path, [image.name for image in IMAGES], fail=True)
+    assert result.returncode == 31
+    assert [call[0] for call in calls] == ["build"]
+
+
+@pytest.mark.parametrize("branch,change_id", [("dev", ""), ("kim_chanju", "42")])
+def test_wrong_branch_and_pr_cannot_publish(bash, tmp_path, branch, change_id):
+    result, calls = build_with_stub(bash, tmp_path, [IMAGES[0].name], branch=branch, change_id=change_id)
+    assert result.returncode != 0 and calls == []
+    assert "configured non-PR branch" in result.stderr
+
+
+@pytest.mark.parametrize("name", ["typo", "chargeops-alert-router", "chargeops-mock-csms"])
+def test_unknown_or_removed_image_never_reaches_docker(bash, tmp_path, name):
+    result, calls = build_with_stub(bash, tmp_path, [name])
+    assert result.returncode != 0 and calls == []
+    assert "Unknown image" in result.stderr
+
+
+def test_no_selection_does_not_execute_docker(bash, tmp_path):
+    result, calls = build_with_stub(bash, tmp_path, [], publish=False)
+    assert result.returncode == 0 and calls == []
+
+
+def test_diff_detects_root_pipeline_apps_and_tests_but_ignores_other_infra(bash, tmp_path):
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path, text=True).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "CI test")
+    git("config", "user.email", "ci-test@example.invalid")
+    (tmp_path / "initial.txt").write_text("initial")
+    git("add", ".")
+    git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "initial")
+    base = git("rev-parse", "HEAD")
+    included = ["Jenkinsfile", "apps/ai-gateway/health.py", "apps/common/db.py", "tests/test_ci.py"]
+    for name in included + ["infra/app/Jenkinsfile", "docs/note.md", "db/change.sql"]:
+        file = tmp_path / name
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("changed\n")
+    git("add", ".")
+    git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "changed")
+    env = os.environ.copy()
+    env.update(APP_ROOT="apps", GIT_PREVIOUS_SUCCESSFUL_COMMIT=base)
+    result = subprocess.run([bash], input=DIFF, cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert set(result.stdout.splitlines()) == set(included)
+    env["GIT_PREVIOUS_SUCCESSFUL_COMMIT"] = "missing-commit"
+    first = subprocess.run([bash], input=DIFF, cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert first.returncode == 0 and first.stdout.strip() == "__BUILD_ALL__"
+
+
 @pytest.mark.parametrize("folder", ["ai-gateway", "chatops-bot", "notifier"])
-def test_service_common_imports_are_available_in_the_build_context(folder):
-    source_dir = SCRIPT.parents[1] / "apps" / folder
+def test_shared_imports_are_packaged_in_the_build_context(folder):
+    source_dir = ROOT / "apps" / folder
     for source in source_dir.glob("*.py"):
         for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.ImportFrom):
-                if node.module and node.module.startswith("common."):
-                    module = source_dir.parent.joinpath(*node.module.split("."))
-                    assert module.with_suffix(".py").is_file()
-                    assert "COPY common/ ./common/" in (source_dir / "Dockerfile").read_text()
+            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("common."):
+                assert (ROOT / "apps").joinpath(*node.module.split(".")).with_suffix(".py").is_file()
+                assert "COPY common/ ./common/" in (source_dir / "Dockerfile").read_text()
 
 
 def test_bot_policy_preserves_approval_constraints():
-    policy_path = SCRIPT.parents[1] / "apps" / "common" / "policy.py"
-    policy_spec = importlib.util.spec_from_file_location("bot_policy_test", policy_path)
+    policy_spec = importlib.util.spec_from_file_location("bot_policy_test", ROOT / "apps/common/policy.py")
     policy = importlib.util.module_from_spec(policy_spec)
     sys.modules[policy_spec.name] = policy
     policy_spec.loader.exec_module(policy)
@@ -97,54 +159,3 @@ def test_bot_policy_preserves_approval_constraints():
     assert policy.decide("hard_reset", "Lead").approvals_needed == 1
     assert not policy.can_approve("hard_reset", "Lead", "U1", "U1", []).allowed
     assert policy.can_approve("hard_reset", "Lead", "U1", "U2", []).allowed
-
-
-def test_publish_builds_everything_before_pushing_immutable_and_dev_tags(monkeypatch):
-    calls = []
-    monkeypatch.setattr(ci.subprocess, "run", lambda command, **kwargs: calls.append(command))
-    ci.build_images(["chargeops-ai-gateway", "chargeops-v2-csms"], "registry.chargeops.lab:5000/chargeops", "build-12-abc", True)
-    assert [command[1] for command in calls] == ["build", "build", "push", "push", "tag", "push", "tag", "push"]
-    assert calls[0][-1] == "apps"
-    assert calls[0][calls[0].index("-f") + 1] == "apps/ai-gateway/Dockerfile"
-    assert calls[2][-1] == "registry.chargeops.lab:5000/chargeops/chargeops-ai-gateway:build-12-abc"
-    assert calls[-1][-1] == "registry.chargeops.lab:5000/chargeops/chargeops-v2-csms:dev"
-
-
-def test_nonpublish_build_never_pushes(monkeypatch):
-    calls = []
-    monkeypatch.setattr(ci.subprocess, "run", lambda command, **kwargs: calls.append(command))
-    ci.build_images(["chargeops-v2-csms"], "registry.chargeops.lab:5000/chargeops", "build-12-abc", False)
-    assert len(calls) == 1
-    assert calls[0][1] == "build" and calls[0][-1] == "apps"
-
-
-def test_build_failure_never_retags_or_pushes(monkeypatch):
-    calls = []
-
-    def fail(command, **kwargs):
-        calls.append(command)
-        raise subprocess.CalledProcessError(31, command)
-
-    monkeypatch.setattr(ci.subprocess, "run", fail)
-    with pytest.raises(subprocess.CalledProcessError):
-        ci.build_images(["chargeops-ai-gateway"], "registry.chargeops.lab:5000/chargeops", "build-12-abc", True)
-    assert [command[1] for command in calls] == ["build"]
-
-
-@pytest.mark.parametrize("branch,change_id", [("dev", ""), ("kim_chanju", "42")])
-def test_cli_rejects_publication_from_wrong_branch_or_pr(branch, change_id):
-    env = os.environ.copy()
-    env.update(PUBLISH_IMAGES="true", CHECKOUT_BRANCH=branch, CHANGE_ID=change_id, PUBLISH_BRANCH="kim_chanju")
-    result = subprocess.run([sys.executable, str(SCRIPT), "build"], env=env, text=True, capture_output=True)
-    assert result.returncode != 0
-    assert "restricted to the configured non-PR branch" in result.stderr
-
-
-@pytest.mark.parametrize("name", ["typo", "chargeops-chatops-bot", "chargeops-alert-router", "chargeops-mock-csms"])
-def test_removed_or_unknown_image_is_rejected_before_docker(monkeypatch, name):
-    def unexpected_call(*args, **kwargs):
-        pytest.fail("Docker must not execute for an unknown image")
-
-    monkeypatch.setattr(ci.subprocess, "run", unexpected_call)
-    with pytest.raises(ValueError, match="Unknown image"):
-        ci.build_images([name], "registry.chargeops.lab:5000/chargeops", "build-12-abc", True)

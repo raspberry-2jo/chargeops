@@ -7,8 +7,9 @@
 | 경로 | 역할 |
 |---|---|
 | `apps/ai-gateway`, `chatops-bot`, `csms`, `collector`, `notifier`, `virtual-charger` | 서비스 코드, Dockerfile, requirements |
-| `apps/common` | AI gateway·v2 bot·notifier가 사용하는 DB·권한 정책·Slack 메시지 공통 코드 |
-| `scripts/ci.py` | 이미지 목록, 변경 감지, 빌드 입력 검증, Docker Build/Push |
+| `apps/common` | AI gateway·bot·notifier가 사용하는 DB·권한 정책·Slack 메시지 공통 코드 |
+| 루트 `Jenkinsfile` | 변경 감지, 서비스별 이미지 선택, Docker Build/Push |
+| `scripts/ci.py` | Jenkinsfile에 선언된 Dockerfile·COPY 입력 및 Python 문법 검증 |
 | `requirements-dev.txt`, `pytest.ini`, `tests` | 루트 CI 테스트 설정 |
 
 기존 루트 CSMS의 다중 Pod 전달·drain·세션 기록 기능과 Collector의 팀 환경변수 호환 코드를 유지했다. `infra/app`의 오래된 코드로 덮어쓰지 않았다. CSMS의 `requests` import에 맞게 requirements도 보완했다.
@@ -37,6 +38,8 @@
 
 서비스 6개의 빌드 컨텍스트는 `apps`다. 예:
 
+변경 감지와 Build/Push는 주어진 기존 Pipeline 형식처럼 Jenkinsfile 내부 Groovy·shell에 직접 작성했다. `APP_ROOT`는 `apps`이며, 테스트와 Docker 명령은 저장소 루트에서 실행한다. 루트 Jenkinsfile 변경도 감지하기 위해 Git diff는 앱 경로와 루트 CI 파일을 함께 조회한다. Python 보조 스크립트는 빌드 입력 검증만 담당한다.
+
 ```bash
 docker build --pull -f apps/ai-gateway/Dockerfile \
   -t registry.chargeops.lab:5000/chargeops/chargeops-ai-gateway:build-test apps
@@ -44,9 +47,9 @@ docker build --pull -f apps/ai-gateway/Dockerfile \
 
 루트 서비스 6개는 Python 베이스 이미지 `chargeops/python:3.13-slim`만 사용한다. 이 이미지를 Registry에 먼저 준비한다. Dockerfile은 서비스별 requirements를 사용하며 루트 requirements-dev는 CI 테스트용이다. 이전 `infra/app` Job을 계속 사용하는 경우의 3.12 베이스 요구 사항은 이번 루트 구성과 별개다.
 
-발행 이미지는 `chargeops-ai-gateway`, `chargeops-v2-chatops-bot`, `chargeops-v2-csms`, `chargeops-v2-notifier`, `chargeops-v2-vcharger`, `chargeops-v2-collector` 6개다. 각 이미지에 고유 `build-<번호>-<커밋>` 태그와 가변 `dev` 태그를 발행한다. 전체 선택 이미지 빌드가 성공한 후에만 Push한다.
+발행 이미지는 `chargeops-ai-gateway`, `chargeops-chatops-bot`, `chargeops-csms`, `chargeops-notifier`, `chargeops-vcharger`, `chargeops-collector` 6개다. 각 이미지에 고유 `build-<번호>-<커밋>` 태그와 가변 `dev` 태그를 발행한다. 전체 선택 이미지 빌드가 성공한 후에만 Push한다.
 
-독립 Collector의 `Containerfile`과 `collector:0.1` 수동 빌드 경로는 기존 설치 문서와의 호환을 위해 유지한다. Jenkins는 같은 루트 코드로 `chargeops-v2-collector`를 빌드한다. 두 CronJob 일정이 같은 API 키로 중복 수집하지 않도록 GitOps에서 실제 사용할 한쪽만 활성화한다. `collector:0.1`의 `IfNotPresent` 캐시 때문에 내용 변경 시 버전 태그 또는 digest도 함께 변경해야 한다.
+독립 Collector의 `Containerfile`과 `collector:0.1` 수동 빌드 경로는 기존 설치 문서와의 호환을 위해 유지한다. Jenkins는 같은 루트 코드로 `chargeops-collector`를 빌드한다. 두 CronJob 일정이 같은 API 키로 중복 수집하지 않도록 GitOps에서 실제 사용할 한쪽만 활성화한다. `collector:0.1`의 `IfNotPresent` 캐시 때문에 내용 변경 시 버전 태그 또는 digest도 함께 변경해야 한다.
 
 ## Argo CD 연결과 전환
 
@@ -59,16 +62,18 @@ kim_chanju Push → Jenkins 테스트·이미지 Build/Push
                → Argo CD가 Git을 읽어 클러스터에 적용
 ```
 
-읽기 전용으로 확인한 GitOps `main`(`e0f52b5`)에는 다음 설정이 이미 있다. 클러스터에 적용되어 있다는 뜻은 아니므로 GUI와 실제 리소스도 확인한다.
+GitOps 저장소의 로컬 `kim_chanju` 브랜치도 앱 이미지 6개와 같은 이름으로 정리했다. 아직 클러스터 적용을 확인한 것은 아니므로 GUI와 실제 리소스도 확인한다.
 
 - GitOps: `https://github.com/raspberry-2jo/chargeops-gitops.git`
 - Application: `chargeops-chatops-dev`, 경로 `chargeops-chatops/overlays/dev`, 대상 namespace `ops`
 - Auto-Sync: 활성, `selfHeal: true`, `prune: false`
-- Image Updater: `chargeops-image-updater`, 9개 `:dev` 이미지를 digest 전략으로 추적, Kustomization에 Git write-back
+- Image Updater: `chargeops-image-updater`, 6개 `:dev` 이미지를 digest 전략으로 추적, Kustomization에 Git write-back
 
-위 GitOps 확인 시점에는 레거시 3개도 포함되어 있다. 이번 루트 코드 삭제만으로 배포 리소스가 삭제되지는 않는다. GitOps의 레거시 bot·alert-router·mock-csms 리소스와 이미지 추적 항목은 별도로 정리해야 한다. 자동 prune이 꺼져 있으므로 클러스터의 기존 리소스 제거도 별도로 확인한다.
+이름이 충돌한 bot은 기존 `base/chatops-bot` 파일과 Deployment 이름·selector·replica 수를 우선 보존했다. 실행 명령은 새 이미지의 `chatops_bot.app`에 맞추고 `chargeops-app-secrets`를 추가했다. 기존 `slack-credentials`와 `bot-backend-credentials`도 보존했으며, 중복 키는 기존 Secret이 우선한다. 사용하지 않는 alert-router는 overlay와 Image Updater에서 제외했지만 원본 base 파일은 유지한다. 자동 prune이 꺼져 있으므로 클러스터의 이전 이름 리소스 제거는 별도 확인이 필요하다.
 
-소스 폴더를 옮겨도 이미지 이름·컨테이너 모듈 이름을 유지하므로 GitOps의 소스 경로를 앱 저장소로 바꾸지 않는다. 이번 작업에서는 GitOps 저장소와 클러스터 리소스를 수정하지 않았다. Jenkins의 GitOps 직접 커밋 방식으로 전환하려면 기존 Image Updater와 버전 기록 주체를 하나로 정한 뒤 별도로 변경해야 한다.
+이미지 이름과 GitOps의 서비스·리소스 이름에서 앱 버전 접미사를 제거했다. GitOps의 소스 경로는 앱 저장소로 바꾸지 않는다. 앱의 새 이미지 6개를 먼저 Build/Push한 다음 GitOps 변경을 main에 반영한다. Collector PVC 이름 변경은 기존 데이터가 자동 이전된다는 뜻이 아니므로 기존 볼륨 확인과 데이터 이관을 마친 뒤 적용한다. 클러스터에는 직접 적용하지 않았다.
+
+이전 `infra/app/Jenkinsfile`에서는 bot 이미지 이름 충돌 시 기존 `docker/chatops-bot.Dockerfile`이 우선하며 중복 빌드하지 않는다. 현재 앱을 발행하는 루트 Job과 이 이전 Job이 같은 태그를 동시에 쓰지 않도록 한다.
 
 1. 루트 구조를 개인 브랜치에서 검토하고 새 Jenkins Script Path로 CI를 검증한다.
 2. 기존 Job의 Script Path를 바꾸거나 별도 새 Job을 최초 1회 실행해 SCM polling을 등록한다. 별도 Job 방식이면 이전 발행 Job을 중지한다.
@@ -88,6 +93,6 @@ python scripts/ci.py validate
 git diff --check
 ```
 
-Windows에서는 `.ci-venv/Scripts/python.exe`를 사용한다. 테스트는 CI의 선택 빌드·실패/비발행 조건, 공통 모듈의 빌드 포함 여부와 bot 권한 정책을 확인한다. Collector의 DB 통합 테스트는 DB 준비 후 별도로 실행한다. 실제 Docker 빌드·Registry Push 및 Argo CD rollout은 서버에서 검증해야 한다.
+Windows에서는 `.ci-venv/Scripts/python.exe`를 사용한다. 테스트는 실제 Jenkinsfile에서 shell 블록을 추출해 Docker stub으로 서비스별 빌드·실패/비발행 조건을 검증하며, 임시 Git 저장소로 변경 감지 shell을 확인한다. 공통 모듈의 빌드 포함 여부와 bot 권한 정책도 확인한다. Jenkins Groovy Pipeline 실행과 Collector DB 통합 테스트는 별도 서버 검증 대상이다. 실제 Docker 빌드·Registry Push 및 Argo CD rollout은 서버에서 검증해야 한다.
 
 서비스 6개 requirements의 pip dry-run 해석과 Docker 빌드 컨텍스트·COPY 입력, 앱 Python 문법을 로컬에서 확인했다. Docker Desktop Linux 엔진이 실행 중이지 않아 실제 Docker 빌드는 수행하지 못했고, Jenkins의 Python 3.12 실행·클러스터 배포도 로컬 검증에 포함하지 않는다.
