@@ -31,13 +31,14 @@ def bash():
     return executable
 
 
-def build_with_stub(bash, tmp_path, names, publish=True, branch="kim_chanju", change_id="", fail=False):
+def build_with_stub(bash, tmp_path, names, publish=True, branch="kim_chanju", change_id="", fail=False, publish_dev_tag=True):
     log = tmp_path / "docker-calls.txt"
     env = os.environ.copy()
     env.update(CALL_LOG=log.as_posix(), BUILD_IMAGES=" ".join(names),
                REGISTRY="registry.chargeops.lab:5000/chargeops", IMAGE_TAG="build-12-abc",
                PUBLISH_IMAGES=str(publish).lower(), PUBLISH_BRANCH="kim_chanju",
-               CHECKOUT_BRANCH=branch, CHANGE_ID=change_id, FAIL_BUILD=str(int(fail)))
+               CHECKOUT_BRANCH=branch, CHANGE_ID=change_id, FAIL_BUILD=str(int(fail)),
+               PUBLISH_DEV_TAG=str(publish_dev_tag).lower())
     stub = '''docker() {
       printf '%s\t' "$@" >> "$CALL_LOG"
       printf '\n' >> "$CALL_LOG"
@@ -50,7 +51,7 @@ def build_with_stub(bash, tmp_path, names, publish=True, branch="kim_chanju", ch
 
 
 def test_shell_blocks_have_valid_syntax(bash):
-    assert len(BLOCKS) == 4
+    assert len(BLOCKS) >= 4
     for block in BLOCKS:
         subprocess.run([bash, "-n"], input=block, text=True, check=True)
 
@@ -91,6 +92,14 @@ def test_build_failure_prevents_all_pushes(bash, tmp_path):
     result, calls = build_with_stub(bash, tmp_path, [image.name for image in IMAGES], fail=True)
     assert result.returncode == 31
     assert [call[0] for call in calls] == ["build"]
+
+
+def test_bootstrap_default_never_moves_dev_tag(bash, tmp_path):
+    result, calls = build_with_stub(bash, tmp_path, [IMAGES[0].name], publish_dev_tag=False)
+    assert result.returncode == 0, result.stderr
+    assert [call[0] for call in calls] == ['build', 'push']
+    assert not any(call[-1].endswith(':dev') for call in calls)
+    assert "name: 'PUBLISH_DEV_TAG', defaultValue: false" in PIPELINE
 
 
 @pytest.mark.parametrize("branch,change_id", [("dev", ""), ("kim_chanju", "42")])

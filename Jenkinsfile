@@ -4,13 +4,23 @@ pipeline {
     timestamps()
     disableConcurrentBuilds()
     skipDefaultCheckout(true)
-    timeout(time: 45, unit: 'MINUTES')
+    timeout(time: 120, unit: 'MINUTES')
   }
   // Job SCM branch: */kim_chanju; Script Path: Jenkinsfile.
   triggers { pollSCM('H/5 * * * *') }
   parameters {
     booleanParam(name: 'BUILD_ALL_IMAGES', defaultValue: false,
       description: 'Build all six images. The first build automatically builds all images.')
+    booleanParam(name: 'ENABLE_ENVIRONMENT_CD', defaultValue: false,
+      description: 'After bootstrap: deploy CSMS to dev, verify, then wait for admin approval to update ops GitOps. Ops Sync remains manual.')
+    booleanParam(name: 'RUN_OCPP_FIXTURE_TEST', defaultValue: false,
+      description: 'Optional: OCPP checks WRITE to the existing DB using a pre-approved CI-DEV charger. Default verification is read-only.')
+    booleanParam(name: 'PUBLISH_DEV_TAG', defaultValue: false,
+      description: 'Enable only AFTER ops digest freeze and DEV-only Image Updater bootstrap. Unique build tags are always published on the publish branch.')
+    string(name: 'GITOPS_CREDENTIAL_ID', defaultValue: 'chargeops-gitops-write',
+      description: 'Jenkins username/password credential for GitOps Git access.')
+    string(name: 'DEV_KUBECONFIG_CREDENTIAL_ID', defaultValue: 'chargeops-dev-kubeconfig',
+      description: 'Jenkins secret-file kubeconfig limited to dev verification and chargeops-dev Application reads.')
   }
   environment {
     REGISTRY = 'registry.chargeops.lab:5000/chargeops'
@@ -54,7 +64,7 @@ pipeline {
               printf '%s\n' '__BUILD_ALL__'
             else
               git diff --name-only --no-renames "$BASE" "$CURRENT_COMMIT" -- \
-                "$APP_ROOT/" Jenkinsfile requirements-dev.txt pytest.ini scripts/ci.py tests/
+                "$APP_ROOT/" Jenkinsfile requirements-dev.txt pytest.ini scripts/ tests/
             fi
           ''', returnStdout: true).trim()
           def changedFiles = diffOutput ? diffOutput.readLines().findAll { it } : []
@@ -77,7 +87,7 @@ pipeline {
             changedFiles.each { path ->
               if (path == 'Jenkinsfile' || path == 'scripts/ci.py' || path == env.APP_ROOT + '/.dockerignore') {
                 selected.addAll(allImages)
-              } else if (path == 'requirements-dev.txt' || path == 'pytest.ini' ||
+              } else if (path == 'requirements-dev.txt' || path == 'pytest.ini' || path.startsWith('scripts/') ||
                          path.startsWith('tests/') || path.contains('/tests/') || path.contains('/test_')) {
                 runTests = true
                 echo 'Test-only change: ' + path
@@ -151,17 +161,90 @@ pipeline {
             for NAME in $BUILD_IMAGES; do
               docker push "$REGISTRY/$NAME:$IMAGE_TAG"
             done
-            for NAME in $BUILD_IMAGES; do
-              docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$REGISTRY/$NAME:dev"
-              docker push "$REGISTRY/$NAME:dev"
-            done
+            if [ "${PUBLISH_DEV_TAG:-false}" = 'true' ]; then
+              for NAME in $BUILD_IMAGES; do
+                docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$REGISTRY/$NAME:dev"
+                docker push "$REGISTRY/$NAME:dev"
+              done
+            fi
           fi
         '''
+      }
+    }
+    stage('Development delivery and integration test') {
+      when {
+        expression {
+          params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' &&
+            (env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')
+        }
+      }
+      steps {
+        timeout(time: 20, unit: 'MINUTES') {
+          withCredentials([
+            usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(),
+              usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD'),
+            file(credentialsId: params.DEV_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG')
+          ]) {
+            dir('.gitops-delivery') {
+              checkout([$class: 'GitSCM', branches: [[name: '*/main']],
+                extensions: [[$class: 'LocalBranch', localBranch: 'main']],
+                userRemoteConfigs: [[url: 'https://github.com/raspberry-2jo/chargeops-gitops.git',
+                  credentialsId: params.GITOPS_CREDENTIAL_ID.trim()]]])
+            }
+            sh '''
+              set -eu
+              command -v kubectl
+              OCPP_OPTION=''
+              if [ "$RUN_OCPP_FIXTURE_TEST" = 'true' ]; then OCPP_OPTION='--ocpp-fixture-test'; fi
+              .ci-venv/bin/python scripts/env_cd.py prepare --tag "$IMAGE_TAG" --source "$(git rev-parse HEAD)" $OCPP_OPTION
+              .ci-venv/bin/python scripts/env_cd.py verify
+            '''
+          }
+        }
+      }
+    }
+    stage('Production approval') {
+      when {
+        expression {
+          params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' &&
+            (env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')
+        }
+      }
+      steps {
+        script {
+          def candidateImage = sh(script: '.ci-venv/bin/python scripts/env_cd.py describe', returnStdout: true).trim()
+          timeout(time: 30, unit: 'MINUTES') {
+            def approver = input(message: 'Dev integration checks passed. Promote ' + candidateImage + ' to ops GitOps? Ops Argo CD Sync is still manual.',
+              ok: 'Approve ops GitOps update', submitter: 'admin', submitterParameter: 'APPROVER')
+            echo 'Production GitOps update approved by ' + approver
+          }
+        }
+      }
+    }
+    stage('Promote verified digest to ops GitOps') {
+      when {
+        expression {
+          params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' &&
+            (env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')
+        }
+      }
+      steps {
+        withCredentials([
+          usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(),
+            usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD'),
+          file(credentialsId: params.DEV_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG')
+        ]) {
+          sh '''
+            set -eu
+            .ci-venv/bin/python scripts/env_cd.py promote
+          '''
+        }
       }
     }
   }
   post {
     always {
+      archiveArtifacts artifacts: 'artifacts/candidate.json,artifacts/verification.json', allowEmptyArchive: true, fingerprint: true
       sh 'rm -rf .ci-venv || true'
     }
     success {

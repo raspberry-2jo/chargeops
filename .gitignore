@@ -58,6 +58,9 @@ __pycache__/
 *.py[cod]
 .venv/
 .ci-venv/
+.gitops-delivery/
+.gitops-delivery@tmp/
+artifacts/
 venv/
 env/
 *.egg-info/
