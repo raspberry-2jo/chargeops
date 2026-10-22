@@ -10,9 +10,11 @@ import json
 import os
 from pathlib import Path
 import re
+import ssl
 import subprocess
 import time
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, ProxyHandler, HTTPSHandler
+from urllib.error import HTTPError, URLError
 
 import yaml
 
@@ -21,6 +23,23 @@ IMAGE = REGISTRY + '/chargeops/chargeops-csms'
 DEV = 'chargeops-chatops/overlays/development'
 PROD = 'chargeops-chatops/overlays/prod'
 APPLICATION = 'chargeops-dev'
+
+
+class RegistryLookupError(RuntimeError):
+    """Safe connection diagnostics without response bodies or credentials."""
+
+
+def urlopen(request, timeout=30):
+    if not request.full_url.startswith(f'https://{REGISTRY}/v2/'):
+        raise RegistryLookupError('Registry requests must use the configured HTTPS endpoint.')
+    context = ssl.create_default_context()
+    ca = os.environ.get('CHARGEOPS_REGISTRY_CA')
+    docker_ca = Path('/etc/docker/certs.d') / REGISTRY / 'ca.crt'
+    if ca:
+        context.load_verify_locations(cafile=ca)
+    elif docker_ca.is_file():
+        context.load_verify_locations(cafile=str(docker_ca))
+    return build_opener(ProxyHandler({}), HTTPSHandler(context=context)).open(request, timeout=timeout)
 
 
 def run(*args, cwd=None, payload=None, env=None):
@@ -73,14 +92,21 @@ def resolve_digest(reference):
     path = repo.removeprefix(REGISTRY + '/')
     if not re.fullmatch(r'[a-z0-9/._-]+', path) or not re.fullmatch(r'[A-Za-z0-9._:-]+', tag):
         raise ValueError('Invalid registry reference')
-    request = Request(f'http://{REGISTRY}/v2/{path}/manifests/{tag}', headers={
+    request = Request(f'https://{REGISTRY}/v2/{path}/manifests/{tag}', headers={
         'Accept': ', '.join(['application/vnd.oci.image.index.v1+json',
                             'application/vnd.docker.distribution.manifest.list.v2+json',
                             'application/vnd.oci.image.manifest.v1+json',
                             'application/vnd.docker.distribution.manifest.v2+json'])})
-    with urlopen(request, timeout=30) as response:
-        body = response.read()
-        digest = response.headers.get('Docker-Content-Digest', '')
+    try:
+        with urlopen(request, timeout=30) as response:
+            body = response.read()
+            digest = response.headers.get('Docker-Content-Digest', '')
+    except HTTPError as error:
+        raise RegistryLookupError(f'HTTP {error.code} while reading {reference}. Check image existence and Registry permissions.') from None
+    except URLError as error:
+        if isinstance(error.reason, ssl.SSLCertVerificationError):
+            raise RegistryLookupError('Registry TLS certificate verification failed. Configure CHARGEOPS_REGISTRY_CA or the Docker registry CA file on mgmt-agent.') from None
+        raise RegistryLookupError('Cannot reach the HTTPS Registry. Check DNS and port 5000 on mgmt-agent.') from None
     if digest != 'sha256:' + hashlib.sha256(body).hexdigest():
         raise ValueError('Registry digest is missing or does not match the manifest')
     return repo + '@' + digest
@@ -290,6 +316,9 @@ def main():
 if __name__ == '__main__':
     try:
         main()
+    except RegistryLookupError as error:
+        print(f'Delivery stopped: {error}')
+        raise SystemExit(1)
     except Exception as error:
         # No secret/configuration payloads in exception output.
         print(f'Delivery stopped: {error.__class__.__name__}; inspect the relevant stage and prerequisites.')

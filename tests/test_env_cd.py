@@ -18,6 +18,22 @@ A = cd.IMAGE + '@sha256:' + 'a' * 64
 B = cd.IMAGE + '@sha256:' + 'b' * 64
 
 
+def test_build_digest_lookup_uses_https(monkeypatch):
+    import hashlib
+    body = b'{"schemaVersion":2}'
+    digest = 'sha256:' + hashlib.sha256(body).hexdigest()
+    class Response:
+        headers = {'Docker-Content-Digest': digest}
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self): return body
+    def open_manifest(request, **kwargs):
+        assert request.full_url.startswith('https://registry.chargeops.lab:5000/v2/')
+        return Response()
+    monkeypatch.setattr(cd, 'urlopen', open_manifest)
+    assert cd.resolve_digest(cd.IMAGE + ':build-1-abcdef012345') == cd.IMAGE + '@' + digest
+
+
 @pytest.fixture
 def repo(tmp_path):
     def git(*args, cwd=tmp_path):

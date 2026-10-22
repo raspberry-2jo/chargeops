@@ -12,6 +12,7 @@
 - `PUBLISH_DEV_TAG=false`가 기본이다. 고유 build 태그는 발행하되 기존 `:dev` 태그를 움직이지 않는다. 운영 digest 고정과 Dev-only ImageUpdater 적용을 끝낸 뒤 필요한 경우 true로 설정한다. 환경 CD는 false 상태에서도 고유 build 태그를 사용하므로 동작한다.
 - Credentials: `chargeops-gitops-write`(Username/Password), `chargeops-dev-kubeconfig`(Secret file). 기본 ID는 Job 파라미터에서 변경할 수 있다.
 - Python 3.12, venv, Docker, kubectl이 agent에서 필요하다. PyYAML/pytest는 requirements-dev.txt로 설치한다.
+- Registry digest 조회는 HTTPS를 사용하고 환경변수 프록시를 경유하지 않는다. 시스템 CA 또는 `/etc/docker/certs.d/registry.chargeops.lab:5000/ca.crt`를 사용하며, CA가 다른 위치에 있으면 agent에 `CHARGEOPS_REGISTRY_CA`로 경로를 지정한다.
 - `artifacts/candidate.json`, `artifacts/verification.json`을 Jenkins에 보관한다. 실제 토큰·DB DSN은 포함하지 않는다.
 - Prod는 승인된 동일 digest로 Git 설정만 변경된다. 실제 Ops 배포는 운영 Argo CD Application에서 수동 Sync한다.
 - Dev 이미지·설정 또는 운영 기준 설정이 승인 대기 중 바뀌면 중단한다. 이미지 재빌드·가변 태그 재조회로 승격하지 않는다.
