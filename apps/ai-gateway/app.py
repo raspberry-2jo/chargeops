@@ -3,6 +3,7 @@
 모델: Ollama(로컬 LLM, Windows 호스트 10.10.0.1:11434)  ※ 원 설계의 Bedrock 을 대체
 """
 # CI/CD flow verification: comment-only change.
+# Image Updater verification: comment-only image rebuild.
 import logging, os, re, time
 
 import requests
