@@ -14,7 +14,7 @@ pipeline {
   environment {
     REGISTRY = 'registry.chargeops.lab:5000/chargeops'
     APP_ROOT = 'infra/app'
-    PUBLISH_BRANCH = 'dev'
+    PUBLISH_BRANCH = 'kim_chanju'
   }
   stages {
     stage('Checkout') {
