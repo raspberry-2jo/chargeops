@@ -57,6 +57,7 @@ vault-password*
 __pycache__/
 *.py[cod]
 .venv/
+.ci-venv/
 venv/
 env/
 *.egg-info/

@@ -1,5 +1,7 @@
 # ChargeOps v2 CI/CD 적용 기록과 실행 절차
 
+> 루트 `apps/` 통합 이후의 Jenkins 설정은 [루트 apps 기준 CI/CD 안내](../../../docs/infra/root-app-cicd.md)를 따릅니다. 이 디렉터리는 이전 Job 호환용으로 유지합니다.
+
 > 원본 저장소의 적용 기록입니다. 현재 앱 경로, Jenkins SCM/Script Path와 배포 절차는
 > [infra/app 이전 및 CI/CD 연결 문서](../../../docs/infra/app-cicd-migration.md)를 따릅니다.
 > 현재 로컬 작업 브랜치는 `kim_chanju`이며, 원격 Push와 서버 설정 변경은 수행하지 않았습니다.

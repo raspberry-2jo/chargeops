@@ -1,5 +1,7 @@
 # ChargeOps 앱을 infra/app으로 이전한 내역과 CI/CD 연결 절차
 
+> 이 문서는 이전 `infra/app` 구성의 기록입니다. 새 루트 앱 구성과 Jenkins Script Path는 [루트 apps 기준 CI/CD 안내](root-app-cicd.md)를 따릅니다. 기존 Job 전환 전까지 이전 경로는 유지합니다.
+
 ## 로컬 이전 범위
 
 - 대상: `https://github.com/raspberry-2jo/chargeops.git`, 로컬 작업 브랜치 `kim_chanju`.

@@ -19,11 +19,18 @@
 /deploy/                    @raspberry-2jo/infra-team
 /monitoring/                @raspberry-2jo/infra-team
 /Jenkinsfile                @raspberry-2jo/infra-team
+/apps/legacy/               @raspberry-2jo/infra-team
+/scripts/ci.py              @raspberry-2jo/infra-team
 
 # ----- 데이터 -----
 /apps/collector/            @raspberry-2jo/data-team
 /apps/chatops-bot/          @raspberry-2jo/data-team
 /apps/ai-gateway/           @raspberry-2jo/data-team
+/apps/notifier/             @raspberry-2jo/data-team
+/apps/common/               @raspberry-2jo/infra-team @raspberry-2jo/data-team
+/requirements-dev.txt       @raspberry-2jo/infra-team @raspberry-2jo/data-team
+/pytest.ini                 @raspberry-2jo/infra-team @raspberry-2jo/data-team
+/tests/                     @raspberry-2jo/infra-team @raspberry-2jo/data-team
 /db/                        @raspberry-2jo/data-team
 
 # ----- 깃 규칙 파일 (양 팀 모두 확인) -----
