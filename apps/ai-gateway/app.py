@@ -2,6 +2,7 @@
 원칙: AI 는 판정·실행하지 않는다. 근거 데이터를 함께 보여 주고, 실패하면 템플릿으로 폴백한다.
 모델: Ollama(로컬 LLM, Windows 호스트 10.10.0.1:11434)  ※ 원 설계의 Bedrock 을 대체
 """
+# CI/CD flow verification: comment-only change.
 import logging, os, re, time
 
 import requests
