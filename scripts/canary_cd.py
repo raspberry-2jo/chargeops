@@ -81,6 +81,7 @@ def sync(revision):
     # Selective Sync does not reapply unrelated workloads, CronJobs or PVCs.
     marker = 'chargeops-jenkins-' + uuid.uuid4().hex[:12]
     operation = {'operation': {'initiatedBy': {'username': marker},
+                 'info': [{'name': 'chargeops-operation-id', 'value': marker}],
                  'sync': {'revision': revision, 'prune': False,
                           'resources': [{'group': 'apps', 'kind': 'Deployment', 'name': 'csms'}]}}}
     cd.run('kubectl', '-n', 'argocd', 'patch', 'application', APPLICATION, '--type=merge', '-p', json.dumps(operation))
@@ -141,20 +142,35 @@ def recover(repo, delivery_path, timeout=600):
         else:
             raise cd.DeliveryPreflightError('Old Sync did not terminate; Git restored, retry recover to Sync it')
     marker = sync(revision)
+    delivery['recovery_operation_id'] = marker
+    cd.save(path, delivery)
     wait(previous, revision, timeout, marker)
     delivery['phase'] = 'recovered'
     cd.save(path, delivery)
     print('Recovery complete: previous Git digest restored and stable Rollout verified')
 
 
+def owns_operation(state, revision, marker):
+    operation = state.get('operation', {})
+    if operation.get('sync', {}).get('revision') != revision:
+        return False
+    identifiers = [item.get('value') for item in operation.get('info', [])
+                   if item.get('name') == 'chargeops-operation-id']
+    if identifiers:
+        return identifiers == [marker]
+    # Compatibility with old requests; never accept an arbitrary admin success.
+    return operation.get('initiatedBy', {}).get('username') == marker
+
+
 def wait(image, revision, timeout, marker):
     deadline = time.monotonic() + timeout
     last_phase = None
+    last_checks = None
+    polls = 0
     while time.monotonic() < deadline:
         app = check_application()
         operation = app.get('status', {}).get('operationState', {})
-        requested = operation.get('operation', {}).get('sync', {}).get('revision')
-        own = requested == revision and operation.get('operation', {}).get('initiatedBy', {}).get('username') == marker
+        own = owns_operation(operation, revision, marker)
         if own and operation.get('phase') in ['Failed', 'Error']:
             raise cd.DeliveryPreflightError('Argo CD selective CSMS Sync failed')
         rollout, healthy = rollout_state(image)
@@ -163,6 +179,13 @@ def wait(image, revision, timeout, marker):
             print('CSMS Rollout phase: ' + phase, flush=True)
             last_phase = phase
         deployment, actual = deployment_image()
+        checks = (own, operation.get('phase') == 'Succeeded', healthy, actual == image)
+        if checks != last_checks or polls % 6 == 0:
+            print('Canary completion checks: own_sync=' + str(checks[0])
+                  + ', sync_succeeded=' + str(checks[1]) + ', rollout_ready=' + str(checks[2])
+                  + ', deployment_image_matches=' + str(checks[3]), flush=True)
+            last_checks = checks
+        polls += 1
         if actual == image and (rollout.get('status', {}).get('abort') or phase == 'Degraded'):
             # During recovery the old aborted generation may still be observed.
             # Wait until the new workload template is reflected in current RS.
@@ -171,7 +194,7 @@ def wait(image, revision, timeout, marker):
         if own and operation.get('phase') == 'Succeeded' and healthy:
             return
         time.sleep(5)
-    raise cd.DeliveryPreflightError('Canary rollout did not become healthy within the deadline')
+    raise cd.DeliveryPreflightError('Canary completion deadline exceeded; inspect the last completion checks and recovery receipt')
 
 
 def image_is_current_rs(rollout, image):
@@ -196,6 +219,8 @@ def deliver(repo, delivery_path, timeout):
         raise cd.DeliveryPreflightError('Canary policy changed after approval; refusing stale Sync')
     try:
         marker = sync(delivery['revision'])
+        delivery['operation_id'] = marker
+        cd.save(delivery_path, delivery)
         wait(delivery['image'], delivery['revision'], timeout, marker)
         delivery['phase'] = 'succeeded'
         cd.save(delivery_path, delivery)

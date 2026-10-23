@@ -38,6 +38,7 @@ def test_sync_is_bound_to_revision_and_only_csms(monkeypatch):
     marker = canary.sync('c' * 40)
     operation = json.loads(commands[0][-1])['operation']
     assert operation['initiatedBy']['username'] == marker
+    assert operation['info'] == [{'name': 'chargeops-operation-id', 'value': marker}]
     assert operation['sync'] == {'revision': 'c' * 40, 'prune': False,
                                  'resources': [{'group': 'apps', 'kind': 'Deployment', 'name': 'csms'}]}
 
@@ -221,6 +222,28 @@ def test_old_success_for_same_revision_cannot_complete_a_new_operation(monkeypat
     monkeypatch.setattr(canary.time, 'sleep', lambda *a: None)
     with pytest.raises(ValueError, match='deadline'):
         canary.wait(B, 'c' * 40, 2, 'new-marker')
+
+
+@pytest.mark.parametrize('case', ['same', 'stale', 'wrong_revision', 'conflicting'])
+def test_sync_identity_uses_explicit_operation_info_with_rewritten_username(monkeypatch, case):
+    app = application()
+    info = [{'name': 'chargeops-operation-id', 'value': 'new-marker' if case != 'stale' else 'old-marker'}]
+    if case == 'conflicting':
+        info.append({'name': 'chargeops-operation-id', 'value': 'other-marker'})
+    app['status'] = {'operationState': {'phase': 'Succeeded', 'operation': {
+        'sync': {'revision': ('d' if case == 'wrong_revision' else 'c') * 40},
+        'initiatedBy': {'username': 'admin'}, 'info': info}}}
+    monkeypatch.setattr(canary, 'check_application', lambda: app)
+    monkeypatch.setattr(canary, 'rollout_state', lambda image: ({'status': {'phase': 'Healthy'}}, True))
+    monkeypatch.setattr(canary, 'deployment_image', lambda: ({}, B))
+    ticks = iter([0, 0, 3])
+    monkeypatch.setattr(canary.time, 'monotonic', lambda: next(ticks))
+    monkeypatch.setattr(canary.time, 'sleep', lambda *a: None)
+    if case == 'same':
+        canary.wait(B, 'c' * 40, 2, 'new-marker')
+    else:
+        with pytest.raises(ValueError, match='deadline'):
+            canary.wait(B, 'c' * 40, 2, 'new-marker')
 
 
 @pytest.mark.parametrize('failure', ['old_generation', 'wrong_image', 'old_stable_rs', 'available_short', 'deployment_active', 'wrong_owner'])

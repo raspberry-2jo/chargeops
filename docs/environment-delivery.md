@@ -21,3 +21,11 @@
 - Git Push 충돌은 강제로 덮어쓰지 않고 실패 처리한다. `.gitops-delivery`에 충돌/미커밋 변경이 남았다면 원인을 검토하고 깨끗한 전용 작업공간으로 재실행한다.
 
 환경 CD가 꺼져 있거나 CSMS 이미지가 빌드되지 않으면 기존 CI만 실행한다. 신규 Dev Namespace와 DB 설정을 담은 Secret은 관리 서버에서 먼저 준비해야 한다. 로컬에서 실제 Jenkins·클러스터 실행을 확인한 것은 아니다.
+# Canary 완료 판별과 대기 로그
+
+`scripts/canary_cd.py`는 요청한 Git revision, 이번 Sync의 고유 식별자, Sync 성공, 대상 이미지의 안정 Rollout 준비 상태를 모두 확인한다. `operation.info`의 `chargeops-operation-id`로 요청과 결과를 연결하며, `initiatedBy.username`만으로 실행자를 추정하지 않는다. 이전 요청과의 호환을 위해 전용 식별자가 없는 경우에만 정확한 기존 username 표식을 확인한다. 임의의 `admin` 성공 기록은 완료로 인정하지 않는다.
+
+대기 중에는 `own_sync`, `sync_succeeded`, `rollout_ready`, `deployment_image_matches`를 상태 변경 시 또는 약 30초마다 출력한다. 요청 식별자는 `artifacts/production-delivery.json`의 `operation_id` 또는 `recovery_operation_id`에 저장된다. 이 값은 비밀 토큰이 아닌 작업 상관 식별자다.
+
+실행 중인 Jenkins에는 나중에 Push한 스크립트 수정이 반영되지 않는다. 현재 코드는 기본 20분 관찰 한도 초과나 Abort 시 Git 복구를 시도한다. 따라서 수정본을 실행하기 전에 현재 빌드의 post 복구까지 종료됐는지 확인하고, 복구 미완료 receipt를 임의로 삭제하지 않는다.
+
