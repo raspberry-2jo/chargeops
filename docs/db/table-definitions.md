@@ -8,12 +8,12 @@
 
 | 구분 | 내용 | 비고 |
 |---|---|---|
-| 테이블 추가 | `charger_session` 충전기 세션 · `slack_user` Slack 사용자 · `stat_avail_daily` 일 가용 표본 | 30개 (v1.1 은 27개) |
+| 테이블 추가 | `charger_session` 충전기 세션 · `slack_user` Slack 사용자 | 29개 (v1.1 은 27개) |
 | 컬럼 추가 | `incident` 에 `acked_by` · `cause_code` · `detail` · `slack_permalink` | 운영 대시보드 · Slack 연결 |
 | 뷰 추가 | 운영 화면용 `v_ops_*` 5개 · `v_charger_card` · `v_fault_duration_daily` | 뷰 · 구체화 뷰 15개 |
 | 관계 | 외래 키 25개 (`charger_session` → `charger` 추가) | |
 | 임베딩 차원 | `incident_embedding.embedding` = `vector(1024)` (bge-m3) | v1.1 의 결정 ⑦(768/1024) → 1024 로 확정 |
-| **저장소에 없는 객체** | `stat_avail_daily` · `fn_add_avail_sample` 은 서버에만 있고 `db/` 마이그레이션에 없음. 부르는 곳도 없음 (0건) | 쓸지 · 지울지 팀 결정 → 쓰면 마이그레이션 추가 |
+| 정리 (10/23) | 서버에만 있고 쓰는 곳이 없던 `stat_avail_daily`(전국 가용 표본) · `fn_add_avail_sample` 제거 — 통계 범위를 제주(`stat_scope`) 하나로 통일 | 정밀 계산 방식(`mv_daily_uptime` · `stat_operator_daily`)만 유지 |
 | 별도 스키마 | `refined` (charger · station · status_daily · status_event) — 정제 예제 결과, 다시 실행하면 새로 만듦 | 운영 정의서 범위 밖 |
 
 ## ERD 그림 (v1.2 · 서버 기준)
@@ -33,7 +33,7 @@
 
 ## 1. 테이블 목록
 
-테이블 30개, 관계(외래 키) 25개, 뷰 · 구체화 뷰 15개.
+테이블 29개, 관계(외래 키) 25개, 뷰 · 구체화 뷰 15개.
 
 | # | 영역 | 테이블 | 한글 이름 | 컬럼 | 기본 키 | 물리 설계 |
 |---|---|---|---|---|---|---|
@@ -65,8 +65,7 @@
 | 26 | 이상 징후 · AI | [`incident_embedding`](#incident_embedding) | 장애 임베딩 | 3 | `incident_id` |  |
 | 27 | 통계 · 품질 | [`stat_scope`](#stat_scope) | 통계 대상 범위 | 2 | `region_code` |  |
 | 28 | 통계 · 품질 | [`stat_operator_daily`](#stat_operator_daily) | 운영기관별 일 통계 | 7 | `operator_id`, `day` |  |
-| 29 | 통계 · 품질 | [`stat_avail_daily`](#stat_avail_daily) `NEW` | 운영기관 · 지역 일 가용 표본 | 6 | `day`, `operator_id`, `region_code` |  |
-| 30 | 통계 · 품질 | [`dq_result`](#dq_result) | 데이터 품질 점검 결과 | 6 | `check_date`, `check_name` |  |
+| 29 | 통계 · 품질 | [`dq_result`](#dq_result) | 데이터 품질 점검 결과 | 6 | `check_date`, `check_name` |  |
 
 ## 2. 관계 (외래 키)
 
@@ -640,19 +639,6 @@
 | 6 | `fault_cnt` | 고장 건수 | `int` | NULL |  |  |  |
 | 7 | `long_fault_cnt` | 장기 고장 건수 | `int` | NULL |  |  |  |
 
-#### stat_avail_daily
-
-**운영기관 · 지역 일 가용 표본** `NEW` — (주석 없음)
-
-| # | 컬럼 | 한글 이름 | 타입 | NULL | 기본값 | 키 | 설명 |
-|---|---|---|---|---|---|---|---|
-| 1 | `day` | 날짜 | `date` | NOT NULL |  | PK |  |
-| 2 | `operator_id` | 운영기관 | `text` | NOT NULL |  | PK |  |
-| 3 | `region_code` | 시도 | `text` | NOT NULL |  | PK |  |
-| 4 | `up_samples` | 가용 표본 수 | `bigint` | NOT NULL | `0` |  |  |
-| 5 | `all_samples` | 전체 표본 수 | `bigint` | NOT NULL | `0` |  |  |
-| 6 | `snaps` | 스냅샷 횟수 | `int` | NOT NULL | `0` |  |  |
-
 #### dq_result
 
 **데이터 품질 점검 결과** — 데이터 품질 점검 결과 (하루 1회, 항목별 점수 0~1)
@@ -688,13 +674,12 @@
 
 ## 5. 함수 (public)
 
-함수 22개 (pgvector · pg_stat_statements 확장 함수 제외).
+함수 21개 (pgvector · pg_stat_statements 확장 함수 제외).
 
 | 함수 | 설명 |
 |---|---|
 | `_register_codes` | (내부용) 처음 보는 코드를 (가이드 미등록)으로 등록하고 그 목록을 돌려줌 |
 | `create_status_history_partition` | 그 날짜가 속한 달의 상태 이력 파티션을 만든다. 그 달의 행이 기본 파티션에 이미 있으면 실패한다 |
-| `fn_add_avail_sample` `NEW` (저장소에 없음) |  |
 | `fn_block_audit_change` |  |
 | `fn_cause_label` |  |
 | `fn_detect_anomaly` | 이상 징후 감지 (1분마다). SECURITY DEFINER: app_reader 가 실행만 할 수 있게 |
