@@ -28,4 +28,3 @@
 대기 중에는 `own_sync`, `sync_succeeded`, `rollout_ready`, `deployment_image_matches`를 상태 변경 시 또는 약 30초마다 출력한다. 요청 식별자는 `artifacts/production-delivery.json`의 `operation_id` 또는 `recovery_operation_id`에 저장된다. 이 값은 비밀 토큰이 아닌 작업 상관 식별자다.
 
 실행 중인 Jenkins에는 나중에 Push한 스크립트 수정이 반영되지 않는다. 현재 코드는 기본 20분 관찰 한도 초과나 Abort 시 Git 복구를 시도한다. 따라서 수정본을 실행하기 전에 현재 빌드의 post 복구까지 종료됐는지 확인하고, 복구 미완료 receipt를 임의로 삭제하지 않는다.
-
