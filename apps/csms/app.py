@@ -22,6 +22,7 @@ from ocpp.v16 import ChargePoint as OcppChargePoint, call, call_result
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
 from psycopg_pool import AsyncConnectionPool
 from websockets.asyncio.server import serve
+from csms.http_metrics import HTTPMetricsMiddleware
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("csms")
@@ -410,6 +411,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ChargeOps CSMS", lifespan=lifespan)
+app.add_middleware(HTTPMetricsMiddleware)
 
 
 @app.get("/healthz")
