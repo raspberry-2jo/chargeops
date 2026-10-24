@@ -1,30 +1,59 @@
-# Dev 검증과 승인 후 Ops 이미지 승격
+# PR 승인 기반 Dev / Ops 배포
 
-루트 Jenkinsfile의 기존 6개 이미지 Build/Push는 유지한다. 환경 CD는 CSMS부터 적용하며 초기 설정 전에는 `ENABLE_ENVIRONMENT_CD=false`가 기본이다.
+루트 Jenkinsfile을 사용한다. Dev는 namespace `dev`, 운영은 기존 `ops`를 유지한다. CI는 여섯 앱을 빌드하지만, 자동 환경 배포와 Canary는 **CSMS만** 대상으로 한다.
 
-관리 서버 초기 설정과 롤백 절차는 GitOps 저장소의 [환경 배포 문서](https://github.com/raspberry-2jo/chargeops-gitops/blob/main/docs/environment-delivery.md)를 따른다.
+```text
+kim_chanju Push → CI / 이미지 Push → CSMS 변경이면 Dev 배포·검증
+                                      ↓
+                         kim_chanju → dev PR 자동 생성
+                                      ↓
+                      다른 운영자의 최신 변경 승인 + Merge
+                                      ↓
+dev Jenkins Job → Merge 커밋 승인 확인 → CI / 이미지 Push
+                                      ↓
+                       CSMS Dev 재배포·통합 검증
+                                      ↓
+               검증한 동일 Digest로 GitOps main의 Ops 경로 변경
+                                      ↓
+                  Argo CD 선택 Sync → Ops Canary → 완료
+                                      ↓ 실패
+                  Abort → 이전 Git Digest 복원 → Sync·정상 검증
+```
 
-## Jenkins 실행
+승인 PR은 **앱 저장소 chargeops의 kim_chanju → dev** 이다. GitOps main은 기존처럼 Jenkins가 직접 갱신하므로 자동 복구를 위한 쓰기 권한을 유지한다. 별도 Jenkins input 승인은 사용하지 않는다.
 
-- 앱 저장소 branch: `kim_chanju`, Script Path: `Jenkinsfile`, agent: `mgmt-agent`.
-- `ENABLE_ENVIRONMENT_CD=true`: CSMS를 빌드한 경우 Dev digest 갱신 → Dev 동기화·읽기 통합 테스트 → admin 승인 → Prod digest 변경.
-- `ENABLE_CANARY=false`가 기본이다. GitOps의 초기 전환 후 true로 설정하면 승인된 CSMS를 25% → 50% → 100% Pod 비율로 배포하고 가용성 검사 실패 시 중단·Git 복구·재동기화한다. [Canary 초기 전환·테스트 안내](https://github.com/raspberry-2jo/chargeops-gitops/blob/main/docs/canary-delivery.md)를 따른다.
-- `RUN_OCPP_FIXTURE_TEST=false`: 기존 DB 설정을 그대로 사용하므로 API/DB 읽기만 기본 검증한다. OCPP 쓰기 테스트는 별도 승인한 개발 충전기 fixture가 있을 때만 켠다.
-- `PUBLISH_DEV_TAG=false`가 기본이다. 고유 build 태그는 발행하되 기존 `:dev` 태그를 움직이지 않는다. 운영 digest 고정과 Dev-only ImageUpdater 적용을 끝낸 뒤 필요한 경우 true로 설정한다. 환경 CD는 false 상태에서도 고유 build 태그를 사용하므로 동작한다.
-- Credentials: `chargeops-gitops-write`(Username/Password), `chargeops-dev-kubeconfig`(Secret file). 기본 ID는 Job 파라미터에서 변경할 수 있다.
-- Canary에는 `bootstrap-canary.py`가 생성하는 `chargeops-canary-kubeconfig`(Secret file)가 추가로 필요하다. 기존 Dev 계정에 운영 쓰기 권한을 추가하지 않는다.
-- Python 3.12, venv, Docker, kubectl이 agent에서 필요하다. PyYAML/pytest는 requirements-dev.txt로 설치한다.
-- Registry digest 조회는 HTTPS를 사용하고 환경변수 프록시를 경유하지 않는다. 시스템 CA 또는 `/etc/docker/certs.d/registry.chargeops.lab:5000/ca.crt`를 사용하며, CA가 다른 위치에 있으면 agent에 `CHARGEOPS_REGISTRY_CA`로 경로를 지정한다.
-- `artifacts/candidate.json`, `artifacts/verification.json`, `artifacts/production-delivery.json`을 Jenkins에 보관한다. 실제 토큰·DB DSN은 포함하지 않는다. 미완료 Canary 복구 기록은 다음 빌드가 삭제하지 않는다.
-- `ENABLE_CANARY=false`이면 Prod는 승인된 동일 digest로 Git 설정만 변경되고 실제 Ops 배포는 수동 Sync한다. true이면 승인 후 Jenkins가 기존 운영 Application에 CSMS만 선택적으로 Sync하며 Rollouts가 지표를 검사한다.
-- Dev 이미지·설정 또는 운영 기준 설정이 승인 대기 중 바뀌면 중단한다. 이미지 재빌드·가변 태그 재조회로 승격하지 않는다.
-- Git Push 충돌은 강제로 덮어쓰지 않고 실패 처리한다. `.gitops-delivery`에 충돌/미커밋 변경이 남았다면 원인을 검토하고 깨끗한 전용 작업공간으로 재실행한다.
+dev Job은 현재 dev HEAD가 PR Merge 커밋인지, PR 최신 HEAD를 작성자 외 사람이 승인했는지, 승인자가 저장소 쓰기 권한을 갖는지 확인한다. 직접 Push, 오래된 빌드, 자기 승인, 봇 승인, 이전 변경 승인은 Ops 승격을 허용하지 않는다. 승격 직전에도 승인과 Dev 검증 결과를 다시 확인한다.
 
-환경 CD가 꺼져 있거나 CSMS 이미지가 빌드되지 않으면 기존 CI만 실행한다. 신규 Dev Namespace와 DB 설정을 담은 Secret은 관리 서버에서 먼저 준비해야 한다. 로컬에서 실제 Jenkins·클러스터 실행을 확인한 것은 아니다.
-# Canary 완료 판별과 대기 로그
+**Merge된 최종 코드를 다시 빌드하고 Dev에서 검증한 동일 Digest를 Ops에 승격**한다. kim_chanju 검증 이후 다른 dev 변경과 합쳐진 결과를 검증하기 위한 절차다.
 
-`scripts/canary_cd.py`는 요청한 Git revision, 이번 Sync의 고유 식별자, Sync 성공, 대상 이미지의 안정 Rollout 준비 상태를 모두 확인한다. `operation.info`의 `chargeops-operation-id`로 요청과 결과를 연결하며, `initiatedBy.username`만으로 실행자를 추정하지 않는다. 이전 요청과의 호환을 위해 전용 식별자가 없는 경우에만 정확한 기존 username 표식을 확인한다. 임의의 `admin` 성공 기록은 완료로 인정하지 않는다.
+## 핵심 파일
 
-대기 중에는 `own_sync`, `sync_succeeded`, `rollout_ready`, `deployment_image_matches`를 상태 변경 시 또는 약 30초마다 출력한다. 요청 식별자는 `artifacts/production-delivery.json`의 `operation_id` 또는 `recovery_operation_id`에 저장된다. 이 값은 비밀 토큰이 아닌 작업 상관 식별자다.
+| 파일 / 경로 | 역할 |
+|---|---|
+| Jenkinsfile | 브랜치별 CI, Dev 검증, PR 생성, Ops 승격, Slack 호출 |
+| scripts/github_cd.py | PR 생성·재사용, 승인 검증, 커밋 상태 등록 |
+| scripts/env_cd.py | Dev Digest 갱신, 통합 검증, 검증 결과에 묶인 Ops 승격 |
+| scripts/canary_cd.py | Ops 선택 Sync, Canary 상태 확인, Abort·GitOps 자동 복구 |
+| scripts/notify_ci.py | 허용된 배포 정보만 Slack으로 전송 |
+| GitOps chargeops-chatops/overlays/development | namespace dev, CSMS 검증용 |
+| GitOps chargeops-chatops/overlays/prod | namespace ops, 운영 Deployment 템플릿 |
+| GitOps chargeops-chatops/overlays/canary | namespace ops, Rollout·Analysis·운영 템플릿 조합 |
 
-실행 중인 Jenkins에는 나중에 Push한 스크립트 수정이 반영되지 않는다. 현재 코드는 기본 20분 관찰 한도 초과나 Abort 시 Git 복구를 시도한다. 따라서 수정본을 실행하기 전에 현재 빌드의 post 복구까지 종료됐는지 확인하고, 복구 미완료 receipt를 임의로 삭제하지 않는다.
+예전 overlays/dev는 이름과 달리 Ops 경로다. namespace dev에는 overlays/development를 사용한다. Application 이름만으로 환경을 판단하지 말고 destination.namespace와 source.path를 확인한다.
+
+## 기본 동작
+
+- ENABLE_ENVIRONMENT_CD=true, ENABLE_CANARY=true. 운영 승격은 dev 브랜치에서만 실행한다. kim_chanju Job은 Ops를 변경하지 않는다.
+- 이미지 태그는 build-브랜치-빌드번호-커밋12자리다. Jenkins Job 간 번호 충돌을 방지한다. 배포에는 Digest를 사용한다.
+- PUBLISH_DEV_TAG=false. Jenkins가 GitOps Digest를 갱신하므로 Image Updater를 다시 켜지 않는다.
+- RUN_OCPP_FIXTURE_TEST=false. 기존 DB 연결을 유지하며 기본 검증은 읽기만 수행한다. OCPP 쓰기 검증은 별도 승인된 테스트 충전기가 있을 때만 실행한다.
+- Ops Application은 Manual Sync를 유지한다. 승인된 dev 빌드가 CSMS만 선택 Sync를 요청한다.
+- 다른 앱은 이미지 빌드·Push와 소스 PR까지 자동화하며 운영 배포는 별도 작업이다.
+- Registry 조회는 HTTPS와 신뢰된 CA를 사용한다. 별도 CA 경로는 agent의 CHARGEOPS_REGISTRY_CA로 지정한다.
+- Git Push 충돌을 강제로 덮어쓰지 않는다. 미완료 복구 receipt를 임의로 삭제하지 않는다.
+- candidate.json, verification.json, production-delivery.json, source-approval.json, pull-request.json을 Jenkins artifacts에 보관한다. Secret 값은 저장하지 않는다.
+- Canary 완료는 자신의 Sync 식별자, Sync 성공, 목표 이미지, 안정된 Rollout을 함께 확인한다. Deployment csms의 replicas 0은 workloadRef 구조에서 정상이며 실제 네 개 Pod는 Rollout이 관리한다.
+
+Slack은 CI 시작·최종 결과, Dev 검증 완료, PR 준비, Ops Canary 시작, 복구 완료·실패를 알린다. Slack 전송 실패는 운영 롤백의 원인으로 취급하지 않는다.
+
+실제 적용 순서는 [PR 승인·Slack 연결 설정](pr-approval-slack.md)을 따른다. 로컬 검증이 서버 배포 성공을 의미하지는 않는다.

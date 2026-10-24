@@ -13,7 +13,7 @@ import uuid
 import env_cd as cd
 
 OVERLAY = 'chargeops-chatops/overlays/canary'
-APPLICATION = 'chargeops-chatops-dev'
+APPLICATION = cd.os.environ.get('OPS_ARGO_APPLICATION', 'chargeops-chatops-dev')
 
 
 def deployment_image():
@@ -44,8 +44,9 @@ def rollout_state(image):
 def check_application():
     app = cd.kubectl('-n', 'argocd', 'get', 'application', APPLICATION)
     spec = app['spec']
+    auto = spec.get('syncPolicy', {}).get('automated')
     if (spec['destination']['namespace'] != 'ops' or spec['source']['path'] != OVERLAY
-            or spec.get('syncPolicy', {}).get('automated')):
+            or (auto is not None and auto.get('enabled') is not False)):
         raise cd.DeliveryPreflightError('Bootstrap the manual ops Canary Application first')
     return app
 

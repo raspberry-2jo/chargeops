@@ -158,11 +158,13 @@ def test_verification_job_is_confined_to_dev_and_has_no_literal_credentials():
     assert job['spec']['backoffLimit'] == 0
 
 
-def test_approval_is_between_verification_and_production_update():
+def test_reviewed_merge_gate_replaces_jenkins_input_and_precedes_production_update():
     pipeline = (ROOT / 'Jenkinsfile').read_text(encoding='utf-8')
-    assert pipeline.index('scripts/env_cd.py verify') < pipeline.index("stage('Production approval')") < pipeline.index('scripts/env_cd.py promote')
-    assert "submitter: 'admin'" in pipeline
-    assert "name: 'ENABLE_ENVIRONMENT_CD', defaultValue: false" in pipeline
+    assert pipeline.index('scripts/github_cd.py validate-merge') < pipeline.index('scripts/env_cd.py verify') < pipeline.index('scripts/env_cd.py promote --require-approved-pr')
+    assert "stage('Production approval')" not in pipeline
+    assert "env.CHECKOUT_BRANCH == env.PRODUCTION_BRANCH" in pipeline
+    assert "name: 'ENABLE_ENVIRONMENT_CD', defaultValue: true" in pipeline
+    assert "name: 'ENABLE_CANARY', defaultValue: true" in pipeline
 
 
 def test_unpinned_or_foreign_images_cannot_be_promoted(tmp_path):

@@ -264,3 +264,13 @@ def test_rollout_cannot_report_false_success(monkeypatch, failure):
     monkeypatch.setattr(canary, 'deployment_image', lambda: (deployment, image))
     monkeypatch.setattr(cd, 'kubectl', lambda *a: rollout if 'rollout' in a else {'items': [rs]})
     assert canary.rollout_state(B)[1] is False
+@pytest.mark.parametrize('automated,allowed', [(None, True), ({'enabled': False}, True), ({}, False), ({'enabled': True}, False)])
+def test_ops_application_requires_explicit_manual_sync(monkeypatch, automated, allowed):
+    app = {'spec': {'destination': {'namespace': 'ops'}, 'source': {'path': canary.OVERLAY},
+                    'syncPolicy': {'automated': automated}}}
+    monkeypatch.setattr(canary.cd, 'kubectl', lambda *args: app)
+    if allowed:
+        assert canary.check_application() == app
+    else:
+        with pytest.raises(canary.cd.DeliveryPreflightError):
+            canary.check_application()

@@ -102,11 +102,17 @@ def test_bootstrap_default_never_moves_dev_tag(bash, tmp_path):
     assert "name: 'PUBLISH_DEV_TAG', defaultValue: false" in PIPELINE
 
 
-@pytest.mark.parametrize("branch,change_id", [("dev", ""), ("kim_chanju", "42")])
+@pytest.mark.parametrize("branch,change_id", [("main", ""), ("kim_chanju", "42"), ("dev", "42")])
 def test_wrong_branch_and_pr_cannot_publish(bash, tmp_path, branch, change_id):
     result, calls = build_with_stub(bash, tmp_path, [IMAGES[0].name], branch=branch, change_id=change_id)
     assert result.returncode != 0 and calls == []
     assert "configured non-PR branch" in result.stderr
+
+
+def test_dev_branch_can_publish_its_merged_build(bash, tmp_path):
+    result, calls = build_with_stub(bash, tmp_path, [IMAGES[0].name], branch='dev')
+    assert result.returncode == 0, result.stderr
+    assert any(call[0] == 'push' for call in calls)
 
 
 @pytest.mark.parametrize("name", ["typo", "chargeops-alert-router", "chargeops-mock-csms"])

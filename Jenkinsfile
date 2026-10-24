@@ -1,3 +1,24 @@
+def notifyDelivery(String event) {
+  if (env.PUBLISH_IMAGES != 'true') { return }
+  try {
+    withEnv(["NOTIFY_EVENT=${event}"]) {
+      withCredentials([string(credentialsId: params.SLACK_CREDENTIAL_ID.trim(), variable: 'SLACK_CICD_TOKEN')]) {
+        sh(script: 'python3.12 scripts/notify_ci.py', returnStatus: true)
+      }
+    }
+  } catch (Exception ignored) {
+    echo 'Slack notification unavailable; check the configured credential. Delivery result is unchanged.'
+  }
+}
+
+def githubStatus(String state, String context = 'chargeops/dev-integration') {
+  withEnv(["GITHUB_STATUS_STATE=${state}", "GITHUB_STATUS_CONTEXT=${context}"]) {
+    withCredentials([string(credentialsId: params.GITHUB_PR_CREDENTIAL_ID.trim(), variable: 'GITHUB_PR_TOKEN')]) {
+      sh '.ci-venv/bin/python scripts/github_cd.py status --source "$SOURCE_COMMIT" --state "$GITHUB_STATUS_STATE" --context "$GITHUB_STATUS_CONTEXT"'
+    }
+  }
+}
+
 pipeline {
   agent { label 'mgmt-agent' }
   options {
@@ -6,15 +27,15 @@ pipeline {
     skipDefaultCheckout(true)
     timeout(time: 120, unit: 'MINUTES')
   }
-  // Job SCM branch: */kim_chanju; Script Path: Jenkinsfile.
+  // Preview job: */kim_chanju. Production job: */dev. Both use root Jenkinsfile.
   triggers { pollSCM('H/5 * * * *') }
   parameters {
     booleanParam(name: 'BUILD_ALL_IMAGES', defaultValue: false,
       description: 'Build all six images. The first build automatically builds all images.')
-    booleanParam(name: 'ENABLE_ENVIRONMENT_CD', defaultValue: false,
-      description: 'After bootstrap: deploy CSMS to dev, verify, then wait for admin approval to update ops GitOps. Ops Sync remains manual.')
-    booleanParam(name: 'ENABLE_CANARY', defaultValue: false,
-      description: 'After bootstrap-canary.py: approved CSMS promotion automatically Syncs ops through 25/50/100 percent Pod canary and restores Git on failure.')
+    booleanParam(name: 'ENABLE_ENVIRONMENT_CD', defaultValue: true,
+      description: 'CSMS CD: kim_chanju verifies Dev and opens a PR; an independently reviewed dev merge verifies again and promotes ops.')
+    booleanParam(name: 'ENABLE_CANARY', defaultValue: true,
+      description: 'Required for dev production delivery: 25/50/100 percent CSMS Canary with automatic Git recovery. Preview never promotes ops.')
     booleanParam(name: 'RUN_OCPP_FIXTURE_TEST', defaultValue: false,
       description: 'Optional: OCPP checks WRITE to the existing DB using a pre-approved CI-DEV charger. Default verification is read-only.')
     booleanParam(name: 'PUBLISH_DEV_TAG', defaultValue: false,
@@ -25,11 +46,25 @@ pipeline {
       description: 'Jenkins secret-file kubeconfig limited to dev verification and chargeops-dev Application reads.')
     string(name: 'CANARY_KUBECONFIG_CREDENTIAL_ID', defaultValue: 'chargeops-canary-kubeconfig',
       description: 'Restricted Secret file from bootstrap-canary.py: ops rollout observation, abort and the existing ops Application Sync.')
+    string(name: 'GITHUB_PR_CREDENTIAL_ID', defaultValue: 'chargeops-github-pr-token',
+      description: 'Secret text: chargeops app Pull requests write, Commit statuses write and Contents read.')
+    string(name: 'SLACK_CREDENTIAL_ID', defaultValue: 'chargeops-cicd-slack-token',
+      description: 'Secret text: Slack bot token with chat:write; invite the bot to the channel.')
+    string(name: 'SLACK_CHANNEL_ID', defaultValue: 'C0CBS4DFPGW', description: 'CI/CD notification channel ID.')
+    string(name: 'DEV_ARGO_APPLICATION', defaultValue: 'chargeops-chatops-dev',
+      description: 'Existing Argo CD Application targeting namespace dev and overlays/development.')
+    string(name: 'OPS_ARGO_APPLICATION', defaultValue: 'chargeops-chatops',
+      description: 'Existing manual Argo CD Application targeting namespace ops and overlays/canary.')
   }
   environment {
     REGISTRY = 'registry.chargeops.lab:5000/chargeops'
     APP_ROOT = 'apps'
     PUBLISH_BRANCH = 'kim_chanju'
+    PRODUCTION_BRANCH = 'dev'
+    SLACK_CICD_CHANNEL = "${params.SLACK_CHANNEL_ID}"
+    DEV_ARGO_APPLICATION = "${params.DEV_ARGO_APPLICATION}"
+    OPS_ARGO_APPLICATION = "${params.OPS_ARGO_APPLICATION}"
+    DEV_CHECK_STATE = 'not_started'
   }
   stages {
     stage('Checkout') {
@@ -38,11 +73,14 @@ pipeline {
           def checkoutVars = checkout scm
           env.CHECKOUT_BRANCH = (env.BRANCH_NAME ?: checkoutVars.GIT_BRANCH ?: env.GIT_BRANCH ?: '')
             .replaceFirst(/^refs\/heads\//, '').replaceFirst(/^origin\//, '')
-          env.PUBLISH_IMAGES = (env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH && !env.CHANGE_ID).toString()
+          env.PUBLISH_IMAGES = ([env.PUBLISH_BRANCH, env.PRODUCTION_BRANCH].contains(env.CHECKOUT_BRANCH) && !env.CHANGE_ID).toString()
+          env.SOURCE_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
           def sha = sh(script: 'git rev-parse --short=12 HEAD', returnStdout: true).trim()
-          env.IMAGE_TAG = 'build-' + env.BUILD_NUMBER + '-' + sha
+          def tagBranch = env.CHECKOUT_BRANCH == env.PRODUCTION_BRANCH ? 'dev' : 'kim_chanju'
+          env.IMAGE_TAG = 'build-' + tagBranch + '-' + env.BUILD_NUMBER + '-' + sha
           echo 'IMAGE_TAG=' + env.IMAGE_TAG
           echo 'Branch=' + env.CHECKOUT_BRANCH + ', publish images=' + env.PUBLISH_IMAGES
+          notifyDelivery('CI started')
         }
       }
     }
@@ -113,7 +151,7 @@ pipeline {
       }
     }
     stage('Test (Python 3.12)') {
-      when { expression { env.APP_CHANGED == 'true' } }
+      when { expression { env.APP_CHANGED == 'true' || env.PUBLISH_IMAGES == 'true' } }
       steps {
         sh '''
           set -eu
@@ -126,13 +164,24 @@ pipeline {
         '''
       }
     }
+    stage('Validate reviewed dev merge') {
+      when { expression { params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' && env.CHECKOUT_BRANCH == env.PRODUCTION_BRANCH && env.APP_CHANGED == 'true' } }
+      steps {
+        script {
+          if (!params.ENABLE_CANARY) { error('dev production delivery requires ENABLE_CANARY=true') }
+        }
+        withCredentials([string(credentialsId: params.GITHUB_PR_CREDENTIAL_ID.trim(), variable: 'GITHUB_PR_TOKEN')]) {
+          sh '.ci-venv/bin/python scripts/github_cd.py validate-merge --source "$SOURCE_COMMIT"'
+        }
+      }
+    }
     stage('Registry Build and Push: changed images only') {
       when { expression { env.BUILD_IMAGES?.trim() } }
       steps {
         sh '''
           set -eu
           if [ "$PUBLISH_IMAGES" = 'true' ]; then
-            if [ "$CHECKOUT_BRANCH" != "$PUBLISH_BRANCH" ] || [ -n "${CHANGE_ID:-}" ]; then
+            if { [ "$CHECKOUT_BRANCH" != "$PUBLISH_BRANCH" ] && [ "$CHECKOUT_BRANCH" != "${PRODUCTION_BRANCH:-dev}" ]; } || [ -n "${CHANGE_ID:-}" ]; then
               echo 'Image publication requires the configured non-PR branch.' >&2
               exit 1
             fi
@@ -185,6 +234,10 @@ pipeline {
       }
       steps {
         timeout(time: 20, unit: 'MINUTES') {
+          script {
+            env.DEV_CHECK_STATE = 'pending'
+            githubStatus('pending')
+          }
           withCredentials([
             usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(),
               usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD'),
@@ -207,32 +260,42 @@ pipeline {
               .ci-venv/bin/python scripts/env_cd.py verify
             '''
           }
+          script {
+            githubStatus('success')
+            env.DEV_CHECK_STATE = 'success'
+            notifyDelivery('Dev verification passed')
+          }
         }
       }
     }
-    stage('Production approval') {
+    stage('Create source PR for dev approval') {
       when {
         expression {
-          params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' &&
-            (env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')
+          params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' && env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH &&
+            env.SOURCE_COMMIT?.trim()
         }
       }
       steps {
-        script {
-          def candidateImage = sh(script: '.ci-venv/bin/python scripts/env_cd.py describe', returnStdout: true).trim()
-          timeout(time: 30, unit: 'MINUTES') {
-            def deliveryMode = params.ENABLE_CANARY ? 'Start ops Canary with automatic metric checks and recovery.' : 'Ops Argo CD Sync is still manual.'
-            def approver = input(message: 'Dev integration checks passed. Promote ' + candidateImage + ' to ops GitOps? ' + deliveryMode,
-              ok: 'Approve ops GitOps update', submitter: 'admin', submitterParameter: 'APPROVER')
-            echo 'Production GitOps update approved by ' + approver
+        withCredentials([
+          string(credentialsId: params.GITHUB_PR_CREDENTIAL_ID.trim(), variable: 'GITHUB_PR_TOKEN'),
+          usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD'),
+          file(credentialsId: params.DEV_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG')
+        ]) {
+          script {
+            if ((env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')) {
+              sh '.ci-venv/bin/python scripts/github_cd.py open-pr'
+            } else {
+              sh '.ci-venv/bin/python scripts/github_cd.py open-ci-pr --source "$SOURCE_COMMIT"'
+            }
           }
         }
+        script { notifyDelivery('Source PR ready') }
       }
     }
     stage('Promote verified digest to ops GitOps') {
       when {
         expression {
-          params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' &&
+          params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' && env.CHECKOUT_BRANCH == env.PRODUCTION_BRANCH &&
             (env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')
         }
       }
@@ -246,6 +309,7 @@ pipeline {
           }
         }
         withCredentials([
+          string(credentialsId: params.GITHUB_PR_CREDENTIAL_ID.trim(), variable: 'GITHUB_PR_TOKEN'),
           usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(),
             usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD'),
           file(credentialsId: params.DEV_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG')
@@ -254,12 +318,13 @@ pipeline {
             set -eu
             CANARY_OPTION=''
             if [ "$ENABLE_CANARY" = 'true' ]; then CANARY_OPTION='--canary'; fi
-            .ci-venv/bin/python scripts/env_cd.py promote $CANARY_OPTION
+            .ci-venv/bin/python scripts/env_cd.py promote --require-approved-pr $CANARY_OPTION
           '''
         }
         script {
           if (params.ENABLE_CANARY) {
             stage('Ops Canary and automatic recovery') {
+              notifyDelivery('Ops Canary started')
               withCredentials([file(credentialsId: params.CANARY_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG'),
                 usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
                 timeout(time: 30, unit: 'MINUTES') {
@@ -276,23 +341,38 @@ pipeline {
     always {
       script {
         try {
-          if (params.ENABLE_CANARY && fileExists('.ci-venv/bin/python') && fileExists('artifacts/production-delivery.json')) {
+          if (env.DEV_CHECK_STATE == 'pending' && fileExists('.ci-venv/bin/python')) {
+            try { githubStatus('failure') } catch (Exception ignored) { echo 'Unable to publish failed Dev status; inspect GitHub permissions.' }
+          }
+          if (params.ENABLE_CANARY && env.CHECKOUT_BRANCH == env.PRODUCTION_BRANCH && fileExists('.ci-venv/bin/python') && fileExists('artifacts/production-delivery.json')) {
             withCredentials([file(credentialsId: params.CANARY_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG'),
               usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
               timeout(time: 15, unit: 'MINUTES') {
                 sh '.ci-venv/bin/python scripts/canary_cd.py recover'
               }
             }
+            def phase = sh(script: '''python3.12 -c 'import json; print(json.load(open("artifacts/production-delivery.json"))["phase"])' ''', returnStdout: true).trim()
+            if (phase == 'recovered') { notifyDelivery('Recovery completed') }
           }
+        } catch (Exception failure) {
+          currentBuild.result = 'FAILURE'
+          notifyDelivery('Recovery failed')
+          throw failure
         } finally {
-          archiveArtifacts artifacts: 'artifacts/candidate.json,artifacts/verification.json,artifacts/production-delivery.json', allowEmptyArchive: true, fingerprint: true
+          if (env.PUBLISH_IMAGES == 'true' && fileExists('.ci-venv/bin/python')) {
+            try { githubStatus(currentBuild.currentResult == 'SUCCESS' ? 'success' : 'failure', 'chargeops/ci') }
+            catch (Exception ignored) { echo 'Unable to publish pipeline status; inspect GitHub permissions.' }
+          }
+          def event = currentBuild.currentResult == 'SUCCESS' ? 'Pipeline succeeded' : (currentBuild.currentResult == 'ABORTED' ? 'Pipeline aborted' : 'Pipeline failed')
+          notifyDelivery(event)
+          archiveArtifacts artifacts: 'artifacts/candidate.json,artifacts/verification.json,artifacts/production-delivery.json,artifacts/source-approval.json,artifacts/pull-request.json', allowEmptyArchive: true, fingerprint: true
           sh 'rm -rf .ci-venv || true'
         }
       }
     }
     success {
       echo 'CI completed: ' + (env.BUILD_IMAGES ?: '(no image changes)') + ' : ' + env.IMAGE_TAG
-      echo 'Image publication is restricted to ' + env.PUBLISH_BRANCH + '; current branch=' + env.CHECKOUT_BRANCH
+      echo 'Preview=' + env.PUBLISH_BRANCH + ', production=' + env.PRODUCTION_BRANCH + '; current branch=' + env.CHECKOUT_BRANCH
     }
   }
 }
