@@ -244,7 +244,9 @@ pipeline {
             file(credentialsId: params.DEV_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG')
           ]) {
             dir('.gitops-delivery') {
-              checkout([$class: 'GitSCM', branches: [[name: '*/main']],
+              // This build pushes GitOps commits: polling this checkout would
+              // trigger the CI job again from its own deployment changes.
+              checkout(changelog: false, poll: false, scm: [$class: 'GitSCM', branches: [[name: '*/main']],
                 extensions: [[$class: 'LocalBranch', localBranch: 'main']],
                 userRemoteConfigs: [[url: 'https://github.com/raspberry-2jo/chargeops-gitops.git',
                   credentialsId: params.GITOPS_CREDENTIAL_ID.trim()]]])

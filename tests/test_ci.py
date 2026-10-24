@@ -81,6 +81,16 @@ def test_each_service_builds_only_its_dockerfile(bash, tmp_path, image):
     assert calls[0][-1] == "apps"
 
 
+def test_gitops_delivery_checkout_cannot_trigger_another_ci_build():
+    # Jenkins polls secondary checkouts by default. This repo is written by
+    # the build itself, so including it creates a delivery -> CI feedback loop.
+    secondary = re.search(r'checkout\((.*?chargeops-gitops\.git.*?)\)\s*\n', PIPELINE, re.DOTALL)
+    assert secondary, 'The delivery checkout must remain identifiable'
+    assert re.search(r'\bpoll\s*:\s*false\b', secondary.group(1)), 'Do not poll the repository this build writes'
+    assert re.search(r'\bchangelog\s*:\s*false\b', secondary.group(1))
+    assert 'checkout scm' in PIPELINE and "pollSCM('H/5 * * * *')" in PIPELINE
+
+
 def test_all_builds_finish_before_any_image_is_published(bash, tmp_path):
     result, calls = build_with_stub(bash, tmp_path, [image.name for image in IMAGES])
     assert result.returncode == 0, result.stderr
