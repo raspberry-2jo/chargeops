@@ -51,9 +51,9 @@ pipeline {
     string(name: 'SLACK_CREDENTIAL_ID', defaultValue: 'chargeops-cicd-slack-token',
       description: 'Secret text: Slack bot token with chat:write; invite the bot to the channel.')
     string(name: 'SLACK_CHANNEL_ID', defaultValue: 'C0CBS4DFPGW', description: 'CI/CD notification channel ID.')
-    string(name: 'DEV_ARGO_APPLICATION', defaultValue: 'chargeops-chatops-dev',
+    string(name: 'DEV_ARGO_APPLICATION', defaultValue: 'chargeops-dev',
       description: 'Existing Argo CD Application targeting namespace dev and overlays/development.')
-    string(name: 'OPS_ARGO_APPLICATION', defaultValue: 'chargeops-chatops',
+    string(name: 'OPS_ARGO_APPLICATION', defaultValue: 'chargeops-chatops-dev',
       description: 'Existing manual Argo CD Application targeting namespace ops and overlays/canary.')
   }
   environment {

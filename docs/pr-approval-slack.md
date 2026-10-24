@@ -25,8 +25,8 @@ kubectl -n argocd get applications \
 
 | Jenkins 파라미터 | 기본 Application 이름 | Namespace | 경로 |
 |---|---|---|---|
-| DEV_ARGO_APPLICATION | chargeops-chatops-dev | dev | chargeops-chatops/overlays/development |
-| OPS_ARGO_APPLICATION | chargeops-chatops | ops | chargeops-chatops/overlays/canary |
+| DEV_ARGO_APPLICATION | chargeops-dev | dev | chargeops-chatops/overlays/development |
+| OPS_ARGO_APPLICATION | chargeops-chatops-dev | ops | chargeops-chatops/overlays/canary |
 
 실제 출력이 다르면 **기존 Application 이름**을 지정한다. Application을 새로 만들거나 이름을 바꿔 같은 리소스를 중복 관리하지 않는다.
 
@@ -34,8 +34,8 @@ kubectl -n argocd get applications \
 
 ```bash
 .ci-venv/bin/python scripts/configure-ci-app-access.py \
-  --dev-application chargeops-chatops-dev \
-  --ops-application chargeops-chatops
+  --dev-application chargeops-dev \
+  --ops-application chargeops-chatops-dev
 ```
 
 환경·경로·main 추적과 Ops Manual Sync를 확인한 후, argocd namespace의 기존 Jenkins **Role/RoleBinding 네 개만** 설정한다. Application·Pod·Secret은 변경하지 않는다. 기존 kubeconfig 토큰을 재사용하며 bootstrap-canary.py를 다시 실행할 필요는 없다. 검증 실패 시 실제 Application 매핑부터 확인한다.
@@ -132,8 +132,8 @@ mgmt 관리자 컨텍스트에서 실제 Application 매핑과 Jenkins ServiceAc
 ```bash
 kubectl -n argocd get applications \
   -o custom-columns=NAME:.metadata.name,NAMESPACE:.spec.destination.namespace,PATH:.spec.source.path
-kubectl auth can-i get applications.argoproj.io/chargeops-chatops-dev \
+kubectl auth can-i get applications.argoproj.io/chargeops-dev \
   -n argocd --as=system:serviceaccount:dev:jenkins-dev-verifier
 ```
 
-실제 dev Application이 chargeops-chatops-dev이고 권한이 no라면 1절의 configure-ci-app-access.py로 기존 RBAC를 연결한다. Application 이름이 다르면 Jenkins의 DEV_ARGO_APPLICATION과 권한 연결 명령에 실제 이름을 지정한다. Unauthorized/TLS/연결 오류는 RBAC 변경으로 해결되지 않으므로 kubeconfig 인증 또는 접속을 확인한다. 원인을 확인한 뒤 CI Job을 ENABLE_ENVIRONMENT_CD=true, ENABLE_CANARY=true, BUILD_ALL_IMAGES=true로 재실행한다. Secret 값을 출력하거나 Deployment를 삭제할 필요는 없다.
+실서버 확인 결과 chargeops-dev가 Dev이고, chargeops-chatops-dev는 이름과 달리 Ops다. Dev 계정으로 chargeops-chatops-dev 조회가 no인 것은 정상이다. Dev 권한을 Ops로 확대하지 않는다. Jenkins의 DEV_ARGO_APPLICATION=chargeops-dev, OPS_ARGO_APPLICATION=chargeops-chatops-dev로 설정한다. 기존 Job에 저장된 파라미터는 이전 값일 수 있으므로 Build with Parameters에서 두 값을 명시적으로 지정한다. 올바른 Dev Application인 chargeops-dev 조회도 no일 때만 1절의 configure-ci-app-access.py로 기존 RBAC를 연결한다. Unauthorized/TLS/연결 오류는 RBAC 변경으로 해결되지 않으므로 kubeconfig 인증 또는 접속을 확인한다. 이후 ENABLE_ENVIRONMENT_CD=true, ENABLE_CANARY=true, BUILD_ALL_IMAGES=true로 재실행한다. Secret 값을 출력하거나 Deployment를 삭제할 필요는 없다.
