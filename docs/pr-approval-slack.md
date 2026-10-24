@@ -120,3 +120,20 @@ Jenkins에서 최초 한 번 설정한다.
 전송 상태는 알림 Job 작업공간의 `.pr-notifications/state.json`에 저장하고 각 빌드 artifact로 보관한다. 정상 반복 실행에서는 같은 이벤트를 다시 보내지 않는다. Slack 실패는 해당 이벤트를 기록하지 않아 다음 실행에서 재시도하며, 중단 중 발생한 종료 이벤트도 마지막 정상 확인 이후부터 다시 확인한다. **Workspace 정리 시 최신 state.json을 같은 경로로 복원**한다. 상태 파일을 지우면 최근 이벤트가 다시 전송될 수 있다. Slack 전송 직후 상태 저장 전에 프로세스가 중단되는 경우 재전송 가능성은 있다.
 
 이 구현은 GitHub [PR 조회 API](https://docs.github.com/en/rest/pulls/pulls)와 [리뷰 조회 API](https://docs.github.com/en/rest/pulls/reviews)를 읽고, Jenkins [cron 트리거](https://www.jenkins.io/doc/book/pipeline/syntax/#triggers)로 반복 확인한다.
+
+## 7. Dev verify가 즉시 실패하고 PR이 생성되지 않을 때
+
+`Development digest committed; production unchanged` 이후 verify가 실패하면 Dev GitOps는 이미 갱신됐지만 통합 검증이 완료되지 않은 상태다. PR 생성은 생략하고 Ops 승격도 진행하지 않는다. Dev를 이전 버전으로 되돌렸다는 의미는 아니다.
+
+이전 코드는 kubectl 오류 원문을 숨기면서 모두 RuntimeError로 표시했다. 수정된 코드는 Secret이나 응답 본문을 출력하지 않고 Forbidden, NotFound, Unauthorized, TLS, API connection 오류를 구분한다. 실패한 Dev 상태도 GitHub에 failure로 정리한다.
+
+mgmt 관리자 컨텍스트에서 실제 Application 매핑과 Jenkins ServiceAccount 권한을 확인한다.
+
+```bash
+kubectl -n argocd get applications \
+  -o custom-columns=NAME:.metadata.name,NAMESPACE:.spec.destination.namespace,PATH:.spec.source.path
+kubectl auth can-i get applications.argoproj.io/chargeops-chatops-dev \
+  -n argocd --as=system:serviceaccount:dev:jenkins-dev-verifier
+```
+
+실제 dev Application이 chargeops-chatops-dev이고 권한이 no라면 1절의 configure-ci-app-access.py로 기존 RBAC를 연결한다. Application 이름이 다르면 Jenkins의 DEV_ARGO_APPLICATION과 권한 연결 명령에 실제 이름을 지정한다. Unauthorized/TLS/연결 오류는 RBAC 변경으로 해결되지 않으므로 kubeconfig 인증 또는 접속을 확인한다. 원인을 확인한 뒤 CI Job을 ENABLE_ENVIRONMENT_CD=true, ENABLE_CANARY=true, BUILD_ALL_IMAGES=true로 재실행한다. Secret 값을 출력하거나 Deployment를 삭제할 필요는 없다.

@@ -64,12 +64,12 @@ pipeline {
     SLACK_CICD_CHANNEL = "${params.SLACK_CHANNEL_ID}"
     DEV_ARGO_APPLICATION = "${params.DEV_ARGO_APPLICATION}"
     OPS_ARGO_APPLICATION = "${params.OPS_ARGO_APPLICATION}"
-    DEV_CHECK_STATE = 'not_started'
   }
   stages {
     stage('Checkout') {
       steps {
         script {
+          env.DEV_CHECK_STATE = 'not_started'
           def checkoutVars = checkout scm
           env.CHECKOUT_BRANCH = (env.BRANCH_NAME ?: checkoutVars.GIT_BRANCH ?: env.GIT_BRANCH ?: '')
             .replaceFirst(/^refs\/heads\//, '').replaceFirst(/^origin\//, '')

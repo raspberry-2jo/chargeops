@@ -52,6 +52,22 @@ def run(*args, cwd=None, payload=None, env=None):
                             capture_output=True, env=env)
     if result.returncode:
         # Child output could contain configuration or credentials. Do not echo it.
+        if args[0] == 'kubectl':
+            error = (result.stderr or '').lower()
+            if 'forbidden' in error:
+                reason = 'Forbidden: Jenkins kubeconfig lacks access. Check the exact Argo Application name and its Role/RoleBinding; run configure-ci-app-access.py on mgmt if needed.'
+            elif 'notfound' in error or 'not found' in error:
+                reason = 'NotFound: check the configured Application name, namespace and required Dev resources.'
+            elif 'unauthorized' in error or 'must be logged in' in error:
+                reason = 'Unauthorized: check the Jenkins kubeconfig credential and ServiceAccount token.'
+            elif 'x509' in error or 'certificate' in error:
+                reason = 'TLS: check the Kubernetes API CA and certificate validity in the kubeconfig.'
+            elif any(value in error for value in ['connection refused', 'unable to connect', 'i/o timeout',
+                                                   'context deadline exceeded', 'no route to host', 'no such host']):
+                reason = 'API connection failed: check the kubeconfig server address and agent connectivity.'
+            else:
+                reason = 'unclassified error: check the relevant resource from mgmt; child output withheld.'
+            raise DeliveryPreflightError('Kubernetes command failed (' + reason + ')')
         raise RuntimeError(f'{args[0]} {args[1] if len(args) > 1 else ""} failed')
     return result.stdout.strip()
 
@@ -244,6 +260,9 @@ def verify(repo, candidate_path, receipt_path, timeout):
     ensure_clean(repo)
     if fingerprint(rendered(repo, DEV)) != candidate['development_fingerprint']:
         raise DeliveryPreflightError('Development configuration changed before verification')
+    if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,252}', APPLICATION):
+        raise DeliveryPreflightError('DEV_ARGO_APPLICATION must be a Kubernetes resource name')
+    print('Checking Dev Application=' + APPLICATION + ', namespace=dev, path=' + DEV, flush=True)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if live_candidate(candidate['image']):
