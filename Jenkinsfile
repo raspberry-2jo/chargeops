@@ -36,6 +36,8 @@ pipeline {
       description: 'CSMS CD: kim_chanju verifies Dev and opens a PR; an independently reviewed dev merge verifies again and promotes ops.')
     booleanParam(name: 'ENABLE_CANARY', defaultValue: true,
       description: 'Required for dev production delivery: 25/50/100 percent CSMS Canary with automatic Git recovery. Preview never promotes ops.')
+    choice(name: 'DEV_DELIVERY_MODE', choices: ['auto', 'deployment', 'canary'],
+      description: 'Auto follows the verified Dev Application path; canary is separate from ENABLE_CANARY for ops.')
     booleanParam(name: 'RUN_OCPP_FIXTURE_TEST', defaultValue: false,
       description: 'Optional: OCPP checks WRITE to the existing DB using a pre-approved CI-DEV charger. Default verification is read-only.')
     booleanParam(name: 'PUBLISH_DEV_TAG', defaultValue: false,
@@ -52,7 +54,7 @@ pipeline {
       description: 'Secret text: Slack bot token with chat:write; invite the bot to the channel.')
     string(name: 'SLACK_CHANNEL_ID', defaultValue: 'C0CBS4DFPGW', description: 'CI/CD notification channel ID.')
     string(name: 'DEV_ARGO_APPLICATION', defaultValue: 'chargeops-dev',
-      description: 'Existing Argo CD Application targeting namespace dev and overlays/development.')
+      description: 'Existing Argo CD Application targeting namespace dev and the selected Dev overlay.')
     string(name: 'OPS_ARGO_APPLICATION', defaultValue: 'chargeops-chatops-dev',
       description: 'Existing manual Argo CD Application targeting namespace ops and overlays/canary.')
   }
@@ -70,6 +72,7 @@ pipeline {
       steps {
         script {
           env.DEV_CHECK_STATE = 'not_started'
+          env.DEV_GITOPS_OVERLAY = params.DEV_DELIVERY_MODE == 'canary' ? 'chargeops-chatops/overlays/development-canary' : 'chargeops-chatops/overlays/development'
           def checkoutVars = checkout scm
           env.CHECKOUT_BRANCH = (env.BRANCH_NAME ?: checkoutVars.GIT_BRANCH ?: env.GIT_BRANCH ?: '')
             .replaceFirst(/^refs\/heads\//, '').replaceFirst(/^origin\//, '')
@@ -243,6 +246,11 @@ pipeline {
               usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD'),
             file(credentialsId: params.DEV_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG')
           ]) {
+            script {
+              if (params.DEV_DELIVERY_MODE == 'auto') {
+                env.DEV_GITOPS_OVERLAY = sh(script: '.ci-venv/bin/python scripts/env_cd.py dev-overlay', returnStdout: true).trim()
+              }
+            }
             dir('.gitops-delivery') {
               // This build pushes GitOps commits: polling this checkout would
               // trigger the CI job again from its own deployment changes.
@@ -343,6 +351,18 @@ pipeline {
     always {
       script {
         try {
+            if (env.DEV_CHECK_STATE == 'pending' && env.DEV_GITOPS_OVERLAY == 'chargeops-chatops/overlays/development-canary' && fileExists('.ci-venv/bin/python') && fileExists('artifacts/candidate.json')) {
+              notifyDelivery('Dev Canary failed; recovery started')
+              withCredentials([
+                usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD'),
+                file(credentialsId: params.DEV_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG')
+              ]) {
+                timeout(time: 15, unit: 'MINUTES') {
+                  sh '.ci-venv/bin/python scripts/env_cd.py recover-dev'
+                }
+              }
+              notifyDelivery('Dev Canary recovery complete')
+            }
           if (env.DEV_CHECK_STATE == 'pending' && fileExists('.ci-venv/bin/python')) {
             try { githubStatus('failure') } catch (Exception ignored) { echo 'Unable to publish failed Dev status; inspect GitHub permissions.' }
           }
@@ -367,7 +387,7 @@ pipeline {
           }
           def event = currentBuild.currentResult == 'SUCCESS' ? 'Pipeline succeeded' : (currentBuild.currentResult == 'ABORTED' ? 'Pipeline aborted' : 'Pipeline failed')
           notifyDelivery(event)
-          archiveArtifacts artifacts: 'artifacts/candidate.json,artifacts/verification.json,artifacts/production-delivery.json,artifacts/source-approval.json,artifacts/pull-request.json', allowEmptyArchive: true, fingerprint: true
+          archiveArtifacts artifacts: 'artifacts/candidate.json,artifacts/verification.json,artifacts/dev-recovery.json,artifacts/production-delivery.json,artifacts/source-approval.json,artifacts/pull-request.json', allowEmptyArchive: true, fingerprint: true
           sh 'rm -rf .ci-venv || true'
         }
       }

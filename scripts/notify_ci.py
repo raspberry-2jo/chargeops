@@ -14,6 +14,7 @@ class NoRedirect(HTTPRedirectHandler):
 def message(environ, directory=Path('artifacts')):
     event = environ.get('NOTIFY_EVENT', 'CI/CD status')
     allowed = {'CI started', 'Dev verification passed', 'Source PR ready', 'Ops Canary started',
+               'Dev Canary failed; recovery started', 'Dev Canary recovery complete',
                'Pipeline succeeded', 'Pipeline failed', 'Pipeline aborted', 'Recovery completed', 'Recovery failed'}
     if event not in allowed:
         event = 'CI/CD status'
@@ -35,6 +36,11 @@ def message(environ, directory=Path('artifacts')):
                 elif re.fullmatch(r'registry\.chargeops\.lab:5000/chargeops/chargeops-csms@sha256:[a-f0-9]{64}', value):
                     lines.append(field + ': ' + value)
     pr = directory / 'pull-request.json'
+    dev_recovery = directory / 'dev-recovery.json'
+    if dev_recovery.exists():
+        phase = json.loads(dev_recovery.read_text(encoding='utf-8')).get('phase')
+        if phase in ['recovering', 'recovered']:
+            lines.append('dev recovery: ' + phase)
     if pr.exists():
         url = json.loads(pr.read_text(encoding='utf-8')).get('url', '')
         if re.fullmatch(r'https://github\.com/raspberry-2jo/chargeops/pull/\d+', url):

@@ -20,7 +20,9 @@ import yaml
 
 REGISTRY = 'registry.chargeops.lab:5000'
 IMAGE = REGISTRY + '/chargeops/chargeops-csms'
-DEV = 'chargeops-chatops/overlays/development'
+LEGACY_DEV = 'chargeops-chatops/overlays/development'
+CANARY_DEV = 'chargeops-chatops/overlays/development-canary'
+DEV = os.environ.get('DEV_GITOPS_OVERLAY', LEGACY_DEV)
 PROD = 'chargeops-chatops/overlays/prod'
 CANARY = 'chargeops-chatops/overlays/canary'
 APPLICATION = os.environ.get('DEV_ARGO_APPLICATION', 'chargeops-dev')
@@ -138,7 +140,12 @@ def pin_image(repo, overlay, reference):
         raise DeliveryPreflightError('Only a pinned CSMS candidate may be promoted')
     path = Path(repo) / overlay / 'kustomization.yaml'
     data = yaml.safe_load(path.read_text(encoding='utf-8'))
-    image = next(i for i in data['images'] if i['name'] == IMAGE)
+    image = next((i for i in data.get('images', []) if i['name'] == IMAGE), None)
+    if image is None:
+        if overlay != CANARY_DEV:
+            raise DeliveryPreflightError('Environment CSMS image override is missing')
+        image = {'name': IMAGE}
+        data.setdefault('images', []).append(image)
     image['newName'], image['digest'] = reference.split('@')
     image.pop('newTag', None)
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding='utf-8')
@@ -184,9 +191,29 @@ def candidate_check(candidate):
         raise DeliveryPreflightError('Invalid CSMS candidate')
     if candidate.get('verification_mode', 'read-only') not in ['read-only', 'ocpp-fixture']:
         raise DeliveryPreflightError('Unknown verification mode')
+    validate_dev_overlay()
+    if candidate.get('development_overlay', LEGACY_DEV) != DEV:
+        raise DeliveryPreflightError('Candidate belongs to a different Dev overlay')
+
+
+def validate_dev_overlay():
+    if DEV not in (LEGACY_DEV, CANARY_DEV):
+        raise DeliveryPreflightError('DEV_GITOPS_OVERLAY must select development or development-canary')
+
+
+def detect_dev_overlay():
+    app = kubectl('-n', 'argocd', 'get', 'application', APPLICATION)
+    spec = app['spec']
+    path = spec['source'].get('path')
+    if (spec['destination']['namespace'] != 'dev' or path not in (LEGACY_DEV, CANARY_DEV)
+            or spec['source'].get('targetRevision') != 'main'
+            or spec['source'].get('repoURL') != 'https://github.com/raspberry-2jo/chargeops-gitops.git'):
+        raise DeliveryPreflightError('Dev Application target is outside the allowed Dev delivery paths')
+    return path
 
 
 def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False):
+    validate_dev_overlay()
     if not re.fullmatch(r'build-(?:(?:kim_chanju|dev)-)?[0-9]+-[a-f0-9]{12}', tag):
         raise DeliveryPreflightError('Only a unique build tag may identify a candidate')
     if not re.fullmatch(r'[a-f0-9]{40}', source):
@@ -198,7 +225,13 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False):
         raise DeliveryPreflightError('Production CSMS is not digest-pinned in GitOps. Run freeze-production.py on mgmt, then commit and push overlays/prod/kustomization.yaml before retrying')
     candidate = {'schema': 1, 'source': source, 'image': resolve_digest(IMAGE + ':' + tag),
                  'verification_mode': 'ocpp-fixture' if ocpp_fixture_test else 'read-only',
-                 'production_fingerprint': before, 'previous_production_image': prod_image}
+                 'production_fingerprint': before, 'previous_production_image': prod_image,
+                 'development_overlay': DEV}
+    if DEV == CANARY_DEV:
+        previous = csms_image(repo, DEV)
+        if not re.fullmatch(re.escape(IMAGE) + r'@sha256:[a-f0-9]{64}', previous) or not live_candidate(previous):
+            raise DeliveryPreflightError('Dev Canary baseline must first be bootstrapped and Healthy')
+        candidate.update(development_mode='canary', previous_development_image=previous)
     if canary:
         candidate['canary_fingerprint'] = fingerprint(rendered(repo, CANARY))
     pin_image(repo, DEV, candidate['image'])
@@ -215,6 +248,7 @@ def kubectl(*args):
 
 
 def live_candidate(image):
+    validate_dev_overlay()
     app = kubectl('-n', 'argocd', 'get', 'application', APPLICATION)
     spec, status = app['spec'], app.get('status', {})
     if spec['destination']['namespace'] != 'dev' or spec['source']['path'] != DEV:
@@ -222,6 +256,8 @@ def live_candidate(image):
     if status.get('sync', {}).get('status') != 'Synced' or status.get('health', {}).get('status') != 'Healthy':
         return False
     deployment = kubectl('-n', 'dev', 'get', 'deployment', 'csms')
+    if DEV == CANARY_DEV:
+        return dev_rollout_ready(deployment, image)
     if deployment['spec'].get('replicas') != 1:
         return False
     container = next(c for c in deployment['spec']['template']['spec']['containers'] if c['name'] == 'csms')
@@ -236,6 +272,54 @@ def live_candidate(image):
         p['spec']['containers'][0]['image'] == image
         and any(c['type'] == 'Ready' and c['status'] == 'True' for c in p.get('status', {}).get('conditions', []))
         for p in active)
+
+
+def dev_rollout_ready(deployment, image):
+    """Bind readiness to the exact desired image and current Rollout-owned RS."""
+    rollout = kubectl('-n', 'dev', 'get', 'rollout', 'csms')
+    spec, state = rollout['spec'], rollout.get('status', {})
+    if (deployment['spec'].get('replicas') != 0 or spec.get('replicas') != 2
+            or rollout['metadata'].get('annotations', {}).get('chargeops.io/dev-error-every', '0') != '0'
+            or spec.get('workloadRef', {}).get('name') != 'csms'
+            or spec.get('workloadRef', {}).get('scaleDown') != 'never'):
+        return False
+    container = next(c for c in deployment['spec']['template']['spec']['containers'] if c['name'] == 'csms')
+    if (container['image'] != image or state.get('phase') != 'Healthy' or state.get('abort')
+            or int(state.get('observedGeneration', 0)) < rollout['metadata']['generation']
+            or int(state.get('workloadObservedGeneration', 0)) < deployment['metadata']['generation']
+            or not state.get('stableRS') or state['stableRS'] != state.get('currentPodHash')
+            or any(state.get(key, 0) != 2 for key in ('replicas', 'readyReplicas', 'availableReplicas', 'updatedReplicas'))):
+        return False
+    rs = kubectl('-n', 'dev', 'get', 'replicaset', 'csms-' + state['stableRS'])
+    if not any(o.get('controller') and o.get('uid') == rollout['metadata']['uid']
+               for o in rs['metadata'].get('ownerReferences', [])):
+        return False
+    if next(c['image'] for c in rs['spec']['template']['spec']['containers'] if c['name'] == 'csms') != image:
+        return False
+    pods = kubectl('-n', 'dev', 'get', 'pods', '-l', 'app=csms')['items']
+    active = [p for p in pods if not p['metadata'].get('deletionTimestamp')]
+    return len(active) == 2 and all(
+        any(o.get('controller') and o.get('uid') == rs['metadata']['uid']
+            for o in p['metadata'].get('ownerReferences', []))
+        and next(c['image'] for c in p['spec']['containers'] if c['name'] == 'csms') == image
+        and any(c['type'] == 'Ready' and c['status'] == 'True' for c in p.get('status', {}).get('conditions', []))
+        for p in active)
+
+
+def dev_rollout_failed(image):
+    if DEV != CANARY_DEV:
+        return False
+    deployment = kubectl('-n', 'dev', 'get', 'deployment', 'csms')
+    if next(c['image'] for c in deployment['spec']['template']['spec']['containers'] if c['name'] == 'csms') != image:
+        return False
+    rollout = kubectl('-n', 'dev', 'get', 'rollout', 'csms')
+    state = rollout.get('status', {})
+    if not (state.get('abort') or state.get('phase') == 'Degraded') or not state.get('currentPodHash'):
+        return False
+    rs = kubectl('-n', 'dev', 'get', 'replicaset', 'csms-' + state['currentPodHash'])
+    return (any(o.get('controller') and o.get('uid') == rollout['metadata']['uid']
+                for o in rs['metadata'].get('ownerReferences', []))
+            and next(c['image'] for c in rs['spec']['template']['spec']['containers'] if c['name'] == 'csms') == image)
 
 
 def verification_job(candidate):
@@ -265,6 +349,8 @@ def verify(repo, candidate_path, receipt_path, timeout):
     print('Checking Dev Application=' + APPLICATION + ', namespace=dev, path=' + DEV, flush=True)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if dev_rollout_failed(candidate['image']):
+            raise DeliveryPreflightError('Dev Canary analysis aborted the candidate; Dev recovery is required')
         if live_candidate(candidate['image']):
             break
         time.sleep(5)
@@ -285,6 +371,47 @@ def verify(repo, candidate_path, receipt_path, timeout):
                         'job': name, 'job_uid': result['metadata']['uid'],
                         'verified_at': int(time.time())})
     print('Exact development digest passed ' + candidate['verification_mode'] + ' integration checks')
+
+
+def recover_dev(repo, candidate_path, recovery_path, timeout=600):
+    """Restore only this failed candidate's Dev image; never use Ops credentials."""
+    candidate = load(candidate_path)
+    candidate_check(candidate)
+    if candidate.get('development_mode') != 'canary' or DEV != CANARY_DEV:
+        print('Dev image recovery skipped: candidate did not use Dev Canary')
+        return
+    previous = candidate.get('previous_development_image', '')
+    if not re.fullmatch(re.escape(IMAGE) + r'@sha256:[a-f0-9]{64}', previous):
+        raise DeliveryPreflightError('Dev recovery has no verified pinned baseline')
+    ensure_clean(repo)
+    production_before = production_fingerprint(repo)
+    current = csms_image(repo, DEV)
+    owns_recovery = (Path(recovery_path).is_file()
+        and load(recovery_path).get('candidate') == fingerprint(candidate))
+    if current == candidate['image']:
+        if fingerprint(rendered(repo, DEV)) != candidate['development_fingerprint']:
+            raise DeliveryPreflightError('Dev configuration changed; recovery will not overwrite it')
+        pin_image(repo, DEV, previous)
+        if production_fingerprint(repo) != production_before:
+            raise DeliveryPreflightError('Dev recovery unexpectedly changed production')
+        save(recovery_path, {'candidate': fingerprint(candidate), 'phase': 'recovering',
+                             'image': previous, 'revision': None})
+        revision = commit(repo, DEV, 'revert(dev): restore baseline after failed Canary')
+        receipt = load(recovery_path)
+        receipt['revision'] = revision
+        save(recovery_path, receipt)
+    elif current != previous or not owns_recovery:
+        raise DeliveryPreflightError('Dev has a newer or unrelated image; recovery will not overwrite it')
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if live_candidate(previous):
+            receipt = load(recovery_path)
+            receipt.update(phase='recovered', verified_at=int(time.time()))
+            save(recovery_path, receipt)
+            print('Dev recovery complete: previous Git digest restored and stable Dev Rollout verified')
+            return
+        time.sleep(5)
+    raise DeliveryPreflightError('Dev recovery Git digest restored; stable Rollout verification timed out')
 
 
 def validate_receipt(candidate, receipt, now):
@@ -340,17 +467,21 @@ def reset_artifacts():
         delivery = load(path)
         if delivery.get('canary') and delivery.get('phase') not in ['succeeded', 'recovered']:
             raise DeliveryPreflightError('Unfinished Canary recovery exists. Run canary_cd.py recover before starting a new build; its receipt was preserved')
-    for name in ['candidate.json', 'verification.json', 'production-delivery.json', 'pull-request.json', 'source-approval.json']:
+    recovery = Path('artifacts/dev-recovery.json')
+    if recovery.is_file() and load(recovery).get('phase') != 'recovered':
+        raise DeliveryPreflightError('Unfinished Dev recovery exists; run recover-dev before starting a new build')
+    for name in ['candidate.json', 'verification.json', 'production-delivery.json', 'pull-request.json', 'source-approval.json', 'dev-recovery.json']:
         (Path('artifacts') / name).unlink(missing_ok=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['prepare', 'verify', 'promote', 'describe', 'reset'])
+    parser.add_argument('command', choices=['prepare', 'verify', 'promote', 'describe', 'reset', 'recover-dev', 'dev-overlay'])
     parser.add_argument('--repo', default='.gitops-delivery')
     parser.add_argument('--candidate', default='artifacts/candidate.json')
     parser.add_argument('--receipt', default='artifacts/verification.json')
     parser.add_argument('--delivery', default='artifacts/production-delivery.json')
+    parser.add_argument('--dev-recovery', default='artifacts/dev-recovery.json')
     parser.add_argument('--tag')
     parser.add_argument('--source')
     parser.add_argument('--timeout', type=int, default=600)
@@ -366,6 +497,10 @@ def main():
         promote(args.repo, args.candidate, args.receipt, args.delivery, args.canary, args.require_approved_pr)
     elif args.command == 'reset':
         reset_artifacts()
+    elif args.command == 'recover-dev':
+        recover_dev(args.repo, args.candidate, args.dev_recovery, args.timeout)
+    elif args.command == 'dev-overlay':
+        print(detect_dev_overlay())
     else:
         candidate = load(args.candidate)
         candidate_check(candidate)
