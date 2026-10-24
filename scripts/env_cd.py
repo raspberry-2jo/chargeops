@@ -338,6 +338,23 @@ def verification_job(candidate):
                                            'limits': {'cpu': '500m', 'memory': '256Mi'}}}]}}}}
 
 
+def log_dev_progress(started, timeout):
+    app = kubectl('-n', 'argocd', 'get', 'application', APPLICATION).get('status', {})
+    message = (f"Dev verification: elapsed={int(time.monotonic() - started)}s/{timeout}s"
+               f", sync={app.get('sync', {}).get('status', 'Unknown')}"
+               f", health={app.get('health', {}).get('status', 'Unknown')}")
+    if DEV == CANARY_DEV:
+        rollout = kubectl('-n', 'dev', 'get', 'rollout', 'csms')
+        state = rollout.get('status', {})
+        analysis = state.get('currentStepAnalysisRunStatus') or {}
+        message += (f", rollout={state.get('phase', 'Unknown')}"
+                    f", step={state.get('currentStepIndex', 0)}/{len(rollout.get('spec', {}).get('strategy', {}).get('canary', {}).get('steps', []))}"
+                    f", ready={state.get('readyReplicas', 0)}/{rollout.get('spec', {}).get('replicas', 0)}"
+                    f", analysis={analysis.get('name', 'none')}"
+                    f", analysis_phase={analysis.get('phase', 'none')}")
+    print(message, flush=True)
+
+
 def verify(repo, candidate_path, receipt_path, timeout):
     candidate = load(candidate_path)
     candidate_check(candidate)
@@ -347,14 +364,20 @@ def verify(repo, candidate_path, receipt_path, timeout):
     if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,252}', APPLICATION):
         raise DeliveryPreflightError('DEV_ARGO_APPLICATION must be a Kubernetes resource name')
     print('Checking Dev Application=' + APPLICATION + ', namespace=dev, path=' + DEV, flush=True)
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    next_progress = started
     while time.monotonic() < deadline:
         if dev_rollout_failed(candidate['image']):
             raise DeliveryPreflightError('Dev Canary analysis aborted the candidate; Dev recovery is required')
         if live_candidate(candidate['image']):
             break
+        if time.monotonic() >= next_progress:
+            log_dev_progress(started, timeout)
+            next_progress = time.monotonic() + 30
         time.sleep(5)
     else:
+        log_dev_progress(started, timeout)
         raise DeliveryPreflightError('Development did not converge to the exact candidate')
     job = verification_job(candidate)
     name = job['metadata']['name']
@@ -484,7 +507,7 @@ def main():
     parser.add_argument('--dev-recovery', default='artifacts/dev-recovery.json')
     parser.add_argument('--tag')
     parser.add_argument('--source')
-    parser.add_argument('--timeout', type=int, default=600)
+    parser.add_argument('--timeout', type=int, help='Convergence seconds (Dev Canary verify: 900; otherwise: 600)')
     parser.add_argument('--ocpp-fixture-test', action='store_true')
     parser.add_argument('--canary', action='store_true')
     parser.add_argument('--require-approved-pr', action='store_true')
@@ -492,13 +515,14 @@ def main():
     if args.command == 'prepare':
         prepare(args.repo, args.tag or '', args.source or '', args.candidate, args.ocpp_fixture_test, args.canary)
     elif args.command == 'verify':
-        verify(args.repo, args.candidate, args.receipt, args.timeout)
+        timeout = args.timeout if args.timeout is not None else (900 if DEV == CANARY_DEV else 600)
+        verify(args.repo, args.candidate, args.receipt, timeout)
     elif args.command == 'promote':
         promote(args.repo, args.candidate, args.receipt, args.delivery, args.canary, args.require_approved_pr)
     elif args.command == 'reset':
         reset_artifacts()
     elif args.command == 'recover-dev':
-        recover_dev(args.repo, args.candidate, args.dev_recovery, args.timeout)
+        recover_dev(args.repo, args.candidate, args.dev_recovery, args.timeout if args.timeout is not None else 600)
     elif args.command == 'dev-overlay':
         print(detect_dev_overlay())
     else:

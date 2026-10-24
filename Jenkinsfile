@@ -236,7 +236,9 @@ pipeline {
         }
       }
       steps {
-        timeout(time: 20, unit: 'MINUTES') {
+        // Allow 15 minutes for Dev Canary convergence plus checkout, preparation
+        // and the separate integration Job (up to 210 seconds).
+        timeout(time: 25, unit: 'MINUTES') {
           script {
             env.DEV_CHECK_STATE = 'pending'
             githubStatus('pending')

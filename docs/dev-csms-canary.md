@@ -39,3 +39,10 @@ GitOps scripts/dev-canary.py rehearse는 같은 CSMS 이미지의 템플릿 anno
 시연의 원래 템플릿 복귀는 전용 스크립트가 담당한다. Jenkins의 Git digest 복구는 실제 CI 후보 배포 실패 경로이며
 로컬 테스트는 실제 임시 Git 저장소에서 image-only 복원과 더 최신 이미지 보호를 검증한다.
 서버에서 Jenkins 복구까지 검증했다고 주장하려면 해당 빌드의 실패/복구 로그와 recovered 영수증이 추가로 필요하다.
+
+
+## Dev verification timing
+
+Dev Canary convergence defaults to 900 seconds (15 minutes); legacy Deployment verification and Dev recovery retain 600 seconds. An explicit --timeout overrides this. The Jenkins development stage allows 25 minutes, including checkout, image preparation and the separate integration Job wait (210 seconds).
+
+While waiting, verification prints Argo sync/health and Canary phase, step, ready replicas and current analysis state approximately every 30 seconds. An aborted candidate still fails immediately and enters the existing Dev recovery path.

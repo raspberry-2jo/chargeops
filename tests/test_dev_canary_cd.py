@@ -132,3 +132,49 @@ def test_first_canary_pin_creates_override_without_modifying_parent(repo, monkey
     cd.pin_image(repo, cd.CANARY_DEV, B)
     assert cd.csms_image(repo, cd.CANARY_DEV) == B
     assert cd.csms_image(repo, cd.LEGACY_DEV) == A
+
+
+@pytest.mark.parametrize('overlay,explicit,expected', [
+    ('canary', None, 900), ('legacy', None, 600), ('canary', 42, 42),
+])
+def test_verify_cli_convergence_budget(monkeypatch, overlay, explicit, expected):
+    monkeypatch.setattr(cd, 'DEV', cd.CANARY_DEV if overlay == 'canary' else cd.LEGACY_DEV)
+    argv = ['env_cd.py', 'verify'] + ([] if explicit is None else ['--timeout', str(explicit)])
+    monkeypatch.setattr('sys.argv', argv)
+    calls = []
+    monkeypatch.setattr(cd, 'verify', lambda *args: calls.append(args))
+    cd.main()
+    assert calls[0][-1] == expected
+
+
+@pytest.mark.parametrize('abort', [False, True])
+def test_slow_healthy_canary_can_finish_after_ten_minutes_but_abort_is_immediate(monkeypatch, abort):
+    clock = [0]
+    candidate = {'image': B, 'development_fingerprint': 'expected', 'verification_mode': 'read-only'}
+    monkeypatch.setattr(cd, 'load', lambda *args: candidate)
+    monkeypatch.setattr(cd, 'candidate_check', lambda *args: None)
+    monkeypatch.setattr(cd, 'ensure_clean', lambda *args: None)
+    monkeypatch.setattr(cd, 'rendered', lambda *args: {})
+    monkeypatch.setattr(cd, 'fingerprint', lambda *args: 'expected')
+    monkeypatch.setattr(cd.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(cd.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(cd, 'dev_rollout_failed', lambda *args: abort and clock[0] >= 35)
+    monkeypatch.setattr(cd, 'live_candidate', lambda *args: clock[0] >= 610)
+    progress = []
+    monkeypatch.setattr(cd, 'log_dev_progress', lambda *args: progress.append(clock[0]))
+    monkeypatch.setattr(cd, 'verification_job', lambda *args: {'metadata': {'name': 'check'}})
+    monkeypatch.setattr(cd, 'run', lambda *args, **kwargs: '')
+    monkeypatch.setattr(cd, 'kubectl', lambda *args: {'metadata': {'uid': 'job'}})
+    receipts = []
+    monkeypatch.setattr(cd, 'save', lambda *args: receipts.append(args))
+    if abort:
+        with pytest.raises(cd.DeliveryPreflightError, match='analysis aborted'):
+            cd.verify('repo', 'candidate', 'receipt', 900)
+        assert clock[0] == 35
+        assert not receipts
+    else:
+        cd.verify('repo', 'candidate', 'receipt', 900)
+        assert clock[0] == 610
+        assert receipts[0][1]['image'] == B
+        assert len(progress) > 10
+        assert all(b - a >= 30 for a, b in zip(progress, progress[1:]))
