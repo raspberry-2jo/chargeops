@@ -86,3 +86,37 @@ kim_chanju Job을 유지하고, New Item → Pipeline → Copy from chargeops-ci
 5. Recovery failed면 새 승격을 중단하고 production-delivery.json과 복구 로그를 확인한다. receipt나 Deployment/PVC/Rollout을 지워서 재시도하지 않는다.
 
 Slack 오류는 토큰 없이 경고만 남긴다. 알림이 없으면 Credential ID, 봇 채널 참여, chat:write, agent의 Slack API 연결을 확인한다. 로컬 테스트는 실제 PR 생성·Slack 전송·운영 Sync 성공을 대신하지 않는다.
+
+## 6. PR 승인·수정 요청·종료·Merge 알림 Job
+
+CI Job은 PR을 생성한 뒤 종료되므로, 이후 발생하는 리뷰·종료 알림은 별도의 **관찰 전용 Job**이 담당한다. GitHub Actions Secret이나 새 토큰, Webhook 서버는 필요 없다. 기존 Jenkins Credential 두 개를 재사용한다.
+
+Jenkins에서 최초 한 번 설정한다.
+
+1. New Item → 이름 **chargeops-pr-notifications** → Pipeline → Copy from **chargeops-ci**.
+2. Pipeline script from SCM 설정에서 저장소와 SCM 인증은 유지하고, Branch Specifier를 ***/kim_chanju**, Script Path를 **Jenkinsfile.pr-notifications**로 지정한다.
+3. 저장 후 **Build Now**로 최초 한 번 실행한다. 새 파라미터가 적용되면 Credential ID가 `chargeops-github-pr-token`, `chargeops-cicd-slack-token`인지 확인한다. Slack 채널은 `C0CBS4DFPGW`이다.
+4. 최초 실행이 성공하면 1분마다 PR 상태를 확인한다. agent 대기·네트워크 지연이 추가될 수 있다. 이 Job에서는 이미지 빌드, Dev/Ops 배포, PR 승인·Merge를 하지 않는다.
+
+기존 Job 복사 시 상속된 **Build Triggers → Poll SCM** 설정은 해제한다. 알림 Job은 Jenkinsfile에 정의된 1분 주기의 Build periodically만 사용한다. 기본 작업공간을 사용하고 CI Job과 같은 custom workspace를 지정하지 않는다.
+
+| GitHub에서 한 작업 | Slack 알림 | 배포 의미 |
+|---|---|---|
+| Review → Approve | PR 리뷰 승인 / 리뷰어 / PR 링크 | 아직 Merge 전이므로 이 이벤트만으로 Ops 배포하지 않음 |
+| Review → Request changes | PR 수정 요청 / 리뷰어 / PR 링크 | 수정 요청. PR을 닫거나 배포하지 않음 |
+| Close pull request (Merge 없음) | PR 거부·종료 / PR 링크 | Ops 승격 없음. Dev 자동 롤백 없음 |
+| PR Merge | PR Merge 완료 / 처리자 / PR 링크 | 별도 dev Job의 CI·Dev 재검증 대상. 배포 완료 알림은 별도 |
+
+대상은 앱 저장소의 **kim_chanju → dev** PR이다. 댓글, 이모지 반응, 다른 브랜치 PR에는 결정 알림을 보내지 않는다. 이전 커밋에 대한 리뷰는 최신 변경 승인과 구분해서 표시한다. 이 알림은 기존 Jenkins 운영 승인 검증을 대체하거나 완화하지 않는다.
+
+테스트 순서:
+
+1. 알림 Job을 먼저 한 번 성공시킨다. 처음 실행할 때는 최근 2분 이후 이벤트부터 관찰하며 과거 전체 리뷰를 일괄 전송하지 않는다.
+2. CI Job에서 PR 생성 → 다른 사람이 Approve → Slack 승인 알림 확인.
+3. Request changes → Slack 수정 요청 알림 확인.
+4. Merge하지 않고 Close → Slack 거부·종료 알림 확인. Ops가 그대로인지 확인.
+5. 실제 운영 승격 시험을 할 때만 별도 PR을 승인·Merge하고 Merge 알림 및 기존 Dev/Ops 배포 알림을 확인한다.
+
+전송 상태는 알림 Job 작업공간의 `.pr-notifications/state.json`에 저장하고 각 빌드 artifact로 보관한다. 정상 반복 실행에서는 같은 이벤트를 다시 보내지 않는다. Slack 실패는 해당 이벤트를 기록하지 않아 다음 실행에서 재시도하며, 중단 중 발생한 종료 이벤트도 마지막 정상 확인 이후부터 다시 확인한다. **Workspace 정리 시 최신 state.json을 같은 경로로 복원**한다. 상태 파일을 지우면 최근 이벤트가 다시 전송될 수 있다. Slack 전송 직후 상태 저장 전에 프로세스가 중단되는 경우 재전송 가능성은 있다.
+
+이 구현은 GitHub [PR 조회 API](https://docs.github.com/en/rest/pulls/pulls)와 [리뷰 조회 API](https://docs.github.com/en/rest/pulls/reviews)를 읽고, Jenkins [cron 트리거](https://www.jenkins.io/doc/book/pipeline/syntax/#triggers)로 반복 확인한다.

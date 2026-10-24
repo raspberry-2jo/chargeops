@@ -56,4 +56,6 @@ dev Job은 현재 dev HEAD가 PR Merge 커밋인지, PR 최신 HEAD를 작성자
 
 Slack은 CI 시작·최종 결과, Dev 검증 완료, PR 준비, Ops Canary 시작, 복구 완료·실패를 알린다. Slack 전송 실패는 운영 롤백의 원인으로 취급하지 않는다.
 
+PR 생성 이후의 리뷰 승인·수정 요청·Merge 없는 종료·Merge 완료는 별도 `Jenkinsfile.pr-notifications` Job이 기존 GitHub/Slack Credential로 1분마다 확인한다. 이 관찰 Job은 배포하지 않는다. 최초 Job 생성 및 테스트는 아래 연결 설정 문서 6절을 따른다.
+
 실제 적용 순서는 [PR 승인·Slack 연결 설정](pr-approval-slack.md)을 따른다. 로컬 검증이 서버 배포 성공을 의미하지는 않는다.

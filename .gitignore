@@ -61,6 +61,8 @@ __pycache__/
 .gitops-delivery/
 .gitops-delivery@tmp/
 artifacts/
+.pr-notifications/
+.pr-notify-venv/
 venv/
 env/
 *.egg-info/

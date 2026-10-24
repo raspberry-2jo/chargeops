@@ -46,12 +46,17 @@ def message(environ, directory=Path('artifacts')):
 
 
 def send(environ=os.environ):
+    return send_text(message(environ), environ)
+
+
+def send_text(text, environ=os.environ):
+    """Shared transport for CI and PR notifications; no response bodies logged."""
     token = environ.get('SLACK_CICD_TOKEN', '')
     channel = environ.get('SLACK_CICD_CHANNEL', 'C0CBS4DFPGW')
     if not token or not re.fullmatch(r'[CG][A-Z0-9]+', channel):
         print('Slack notification unavailable: check credential and channel configuration')
         return False
-    payload = {'channel': channel, 'text': message(environ), 'mrkdwn': False,
+    payload = {'channel': channel, 'text': text, 'mrkdwn': False,
                'unfurl_links': False, 'unfurl_media': False}
     request = Request('https://slack.com/api/chat.postMessage', method='POST',
         data=json.dumps(payload).encode(), headers={'Authorization': 'Bearer ' + token,
