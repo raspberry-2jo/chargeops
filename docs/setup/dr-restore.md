@@ -4,7 +4,9 @@
 - 관련 WBS: 4.5 DR 훈련 (DB 부분) · 2.8 후속
 - 버전: versions.md 참고 (PostgreSQL 17 · pgBackRest 2.59 · pg_cron · pgaudit · pgvector)
 - 상태: **실습 훈련 완료 (2026-10-14)** — 빈 VM 에서 AWS 저장소만으로 63초 (+ 패키지 설치 54초). EC2 에서 하는 4.5 훈련은 Terraform 담당과 (6장)
+- 2026-10-23: **왕복 훈련** — 클라우드 역할 서버에서 복원(75초) → 그 서버가 다시 백업 → 온프렘 Patroni 로 복귀, 잃은 데이터 0건. 이때 찾은 두 가지(SSL 인증서 · 체크포인트 대기)를 스크립트에 반영 (5장)
 - 앞 단계: [`aws-s3-backup.md`](aws-s3-backup.md) (repo2 = AWS S3 · 정기 백업), [`pgbackrest-pitr.md`](pgbackrest-pitr.md) (PITR 훈련)
+- 다음 단계: [`dr-failback.md`](dr-failback.md) (클라우드 → 온프렘 복귀)
 
 ## 1. 왜 / 무엇을
 
@@ -65,7 +67,9 @@ sudo DR_MODE=real bash db/ops/pgbackrest/dr-restore.sh
 sudo DR_MODE=real TARGET_TIME='2026-10-14 13:00:00+09' bash db/ops/pgbackrest/dr-restore.sh
 ```
 
-그 뒤 (스크립트 끝에도 나옴): `pg_hba.conf` 에 새 앱 대역 → PgBouncer(`db/ops/pgbouncer/`) → 앱 접속 주소를 새 서버로 → 전체 백업(`--repo=2 --type=full`) → Standby 다시 만들기
+`real` 은 승격 직후 **새 타임라인의 전체 백업(⑧, `--start-fast`)** 까지 받는다(건너뛰려면 `DR_BACKUP=0`). 이 백업이 있어야 클라우드 DB 도 사라졌을 때 다시 살릴 수 있고, 온프렘 복귀([`dr-failback.md`](dr-failback.md))의 출발점이 된다. 걸린 시간 줄에 따로 나오며 RTO 에는 넣지 않는다
+
+그 뒤 (스크립트 끝에도 나옴): `pg_hba.conf` 에 새 앱 대역 → PgBouncer(`db/ops/pgbouncer/`) → 앱 접속 주소를 새 서버로 → Standby 다시 만들기
 
 ## 3. 설정 파일
 
@@ -73,6 +77,7 @@ sudo DR_MODE=real TARGET_TIME='2026-10-14 13:00:00+09' bash db/ops/pgbackrest/dr
 |---|---|---|
 | `/etc/pgbackrest/pgbackrest.conf` | stanza · `pg1-path` · zst · `process-max=2` (비밀 없음) | 스크립트가 만듦 |
 | `/etc/pgbackrest/conf.d/repo2-aws.conf` | repo2 = AWS S3 (키 2줄 또는 `repo2-s3-key-type=auto`), root:postgres 640 | ✗ (키 — 2-1 ② 또는 스크립트 질문) |
+| SSL 인증서 · 키 (`ssl_cert_file` · `ssl_key_file` 위치) | 백업에 있으면 그대로(원래 서버 이름). 데이터 폴더 밖이라 없으면 **7일짜리 임시 자체 서명** — 정식 인증서로 교체 ([`postgres-ssl.md`](postgres-ssl.md)) | 스크립트가 만듦 (없을 때만) |
 | 데이터 폴더 `conf.d/zz-local.conf` | 메모리 4GB 미만이면 `shared_buffers` = 메모리 1/4 (설정 파일의 1GB 는 4GB 기준) | 스크립트가 만듦 |
 | `/var/log/postgresql` | 로그 폴더 — 원래 서버 설정을 따름. 백업에 들어 있지 않아 새로 만든다 (5장) | 스크립트가 만듦 |
 
@@ -118,6 +123,8 @@ RPO                마지막 트랜잭션이 복원 끝보다 20초 앞 (archive
 | 처음엔 SELinux 를 의심 | 실습 VM(db-01 · loadgen)은 `Permissive`. EC2 의 Rocky 가 `Enforcing` 이면 4.5 에서 다시 확인 (`getenforce`, 막히면 `ausearch -m avc`) |
 | `Start request repeated too quickly` | 실패 뒤 systemd 가 5번 다시 시도하고 멈춘 상태 → 다시 시작하려면 `systemctl reset-failed` (스크립트가 함) |
 | 확인 명령이 repo1 에서 5 | 처음 명령은 `grep -c 0000000A` 라 옛 타임라인의 WAL 폴더(`0000000?0000000A` = 타임라인 ?, WAL 번호 A)까지 셌다 → 앞에 붙여 `^0000000A` 로 (4장) |
+| 2026-10-23 왕복 훈련 ⑥ 시작 실패 — `FATAL: could not load server certificate file "/var/lib/pgsql/ssl/server.crt"` | 로그 폴더와 같은 문제: 실습 DB 는 인증서를 데이터 폴더 밖에 둠 → `ssl=on` 설정만 따라옴. 그때는 손으로 임시 인증서를 만들어 띄움 → 스크립트 ⑤ 가 `postgres -C ssl_cert_file` 로 위치를 읽어 없으면 임시 발급 · 경고. 팀 서버는 인증서가 데이터 폴더 안([`postgres-ssl.md`](postgres-ssl.md))이라 그대로 따라오지만, 원래 서버 이름이라 `verify-full` 앱은 교체 필요 |
+| 2026-10-23 살린 DB 의 첫 전체 백업이 95초 동안 진행 없음 (합계 145초) | 백업 시작 때 다음 체크포인트(`checkpoint_timeout`)까지 기다림 → `--start-fast` 로 바로 체크포인트 (스크립트 ⑧) |
 | (예방) PGDG 저장소 404 | 옛 박스(9.6 이하)의 dnf 는 PGDG 주소를 못 만든다 → 먼저 `dnf -y update --exclude='kernel*'` |
 
 ## 6. 팀에서 정할 것 · 다음
@@ -125,3 +132,4 @@ RPO                마지막 트랜잭션이 복원 끝보다 20초 앞 (archive
 - **4.5 EC2 DR (Terraform 담당과)**: AMI(Rocky 9 권장 — 실습과 같은 PGDG 패키지) · 크기 · 네트워크(밖으로 443) · IAM 역할(훈련은 읽기만) · 앱 연결 전환 방법(접속 주소를 이름으로 둘지)
 - 목표 RTO 30분과 비교: EC2 생성 + 약 2분(이번 실측) + 앱 전환
 - 팀 계정으로 옮기면 버킷 · 경로(예: `/chargeops`)만 바꿔 같은 스크립트로
+- 온프렘 복귀: [`dr-failback.md`](dr-failback.md) — 실습 Patroni 로는 완료(2026-10-23), 멘토 서버(수동 전환)는 4.5 때
