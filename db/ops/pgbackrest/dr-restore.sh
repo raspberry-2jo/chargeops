@@ -11,6 +11,7 @@
 #   AWS 설정: /etc/pgbackrest/conf.d/repo2-aws.conf 가 있으면 그대로 쓰고(실습: mgmt 에서 미리 보냄), 없으면 물어본다
 #             EC2 에 IAM 역할을 붙였으면 키 없이(역할 방식). 훈련에는 읽기 권한(ListBucket · GetObject)만 있으면 된다
 #   바꿀 수 있는 값: DR_MODE · TARGET_TIME(비우면 최신. 예 '2026-10-14 13:00:00+09') · REPO(기본 2) · PG_SHARED_BUFFERS
+#                    DR_BACKUP (real 에서만, 기본 1 = 승격 직후 새 타임라인의 전체 백업을 바로 받음. 0 = 건너뜀)
 #                    PGDATA · PGBIN · PG_SERVICE (PGDG 기본 경로가 아닐 때만)
 #   순서 · 결과 · 정리: docs/setup/dr-restore.md
 # ============================================================================
@@ -24,6 +25,7 @@ PGDATA=${PGDATA:-/var/lib/pgsql/17/data}
 PGBIN=${PGBIN:-/usr/pgsql-17/bin}
 PG_SERVICE=${PG_SERVICE:-postgresql-17}
 PG_SHARED_BUFFERS=${PG_SHARED_BUFFERS:-}
+DR_BACKUP=${DR_BACKUP:-1}
 CONF_DIR=/etc/pgbackrest
 AWS_CONF=$CONF_DIR/conf.d/repo$REPO-aws.conf
 PKGS=(postgresql17-server postgresql17-contrib pgvector_17 pg_cron_17 pgaudit_17 'pgbackrest-2.59*')
@@ -126,6 +128,25 @@ case "$logdir" in
         echo "   로그 폴더 $logdir 만듦 (원래 서버 설정 그대로)"
       fi ;;
 esac
+# SSL 인증서 · 키를 데이터 폴더 밖에 두면 설정(ssl=on)만 백업으로 따라오고 파일은 없다
+#   → 시작하자마자 FATAL "could not load server certificate file" (2026-10-23 왕복 훈련, 실습 /var/lib/pgsql/ssl)
+#   없으면 7일짜리 임시 자체 서명 인증서를 만들어 일단 띄우고, 정식 인증서로 바꾸라고 알린다 (docs/setup/postgres-ssl.md)
+if [ "$(pg "$PGBIN/postgres" -D "$PGDATA" -C ssl)" = on ]; then
+  crt=$(pg "$PGBIN/postgres" -D "$PGDATA" -C ssl_cert_file); key=$(pg "$PGBIN/postgres" -D "$PGDATA" -C ssl_key_file)
+  case "$crt" in /*) ;; *) crt=$PGDATA/$crt ;; esac
+  case "$key" in /*) ;; *) key=$PGDATA/$key ;; esac
+  if [ -s "$crt" ] && [ -s "$key" ]; then
+    echo "   SSL 인증서 있음 (백업에 들어 있던 원래 서버 것: $(openssl x509 -in "$crt" -noout -subject 2>/dev/null | sed 's/^subject=//'))"
+    echo "   → 앱이 sslmode=verify-full 로 이 서버 이름을 확인하면 이름이 달라 실패할 수 있음. 정식 인증서로 바꿀 것"
+  else
+    install -d -o postgres -g postgres -m 700 "$(dirname "$crt")" "$(dirname "$key")"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 7 -subj "/CN=$(hostname -f)" -keyout "$key" -out "$crt" 2>/dev/null
+    chown postgres:postgres "$crt" "$key"; chmod 644 "$crt"; chmod 600 "$key"
+    command -v restorecon >/dev/null && restorecon "$crt" "$key"
+    echo "   ⚠ SSL 인증서가 백업에 없음 → 7일짜리 임시 자체 서명 인증서를 만듦 ($crt)"
+    echo "     verify-ca · verify-full 로 접속하는 앱은 실패한다. 정식 인증서로 바꿀 것 (docs/setup/postgres-ssl.md)"
+  fi
+fi
 
 echo "⑥ 시작 → 마지막 WAL 까지 재생 → 승격"
 T3=$(date +%s)
@@ -165,11 +186,25 @@ if [ "$DR_MODE" = real ]; then
   echo "   새 Primary 의 WAL 이 저장소에 올라가는지"
   pg pgbackrest --stanza="$STANZA" check
 fi
+R_TOTAL=$(sec "$T0")
 
-echo "== 걸린 시간: 패키지 ${R_PKG}초 · 저장소 확인 ${R_INFO}초 · 내려받기 ${R_DL}초 · 재생 · 승격 ${R_REPLAY}초 = 합계 $(sec "$T0")초"
+R_BK=""
+if [ "$DR_MODE" = real ] && [ "$DR_BACKUP" = 1 ]; then
+  # 새 타임라인의 첫 전체 백업 — 이것이 있어야 이 서버가 또 사라져도 여기서 다시 살릴 수 있고, 온프렘 복귀(dr-failback.md)의 출발점이 된다
+  #   --start-fast: 없으면 다음 체크포인트(checkpoint_timeout)까지 기다린다 — 2026-10-23 훈련에서 95초를 그냥 기다림
+  echo "⑧ 새 타임라인 전체 백업 (repo$REPO, --start-fast) — 건너뛰려면 DR_BACKUP=0"
+  T4=$(date +%s)
+  pg pgbackrest --stanza="$STANZA" --repo="$REPO" --type=full --start-fast backup
+  R_BK=$(sec "$T4")
+  pg pgbackrest --stanza="$STANZA" --repo="$REPO" info | grep -E 'full backup|timestamp start/stop' | tail -2 | sed 's/^/   /'
+  echo "   $R_BK초"
+fi
+
+echo "== 걸린 시간: 패키지 ${R_PKG}초 · 저장소 확인 ${R_INFO}초 · 내려받기 ${R_DL}초 · 재생 · 승격 ${R_REPLAY}초 = 합계 ${R_TOTAL}초${R_BK:+ (그 뒤 전체 백업 ${R_BK}초 — RTO 에는 넣지 않음)}"
 echo "   (실제 DR 의 RTO = 서버 준비(EC2 생성) + 이 합계 + 앱 접속 전환. '되살린 마지막 트랜잭션' 과 사고 시각의 차이가 RPO)"
 if [ "$DR_MODE" = drill ]; then
   echo "정리: systemctl stop $PG_SERVICE  — 다시 훈련하려면 $PGDATA 를 비운다(지우는 것은 사람이 판단). 순서는 docs/setup/dr-restore.md"
 else
-  echo "다음: pg_hba.conf 에 새 앱 대역 → PgBouncer → 앱 접속 주소를 이 서버로 → 전체 백업(--repo=$REPO --type=full) → Standby 다시 만들기 (docs/setup/dr-restore.md)"
+  echo "다음: pg_hba.conf 에 새 앱 대역 → PgBouncer → 앱 접속 주소를 이 서버로${R_BK:- → 전체 백업(--repo=$REPO --type=full --start-fast)} → Standby 다시 만들기 (docs/setup/dr-restore.md)"
+  echo "      온프렘이 돌아오면: docs/setup/dr-failback.md (클라우드 → 온프렘 복귀)"
 fi
