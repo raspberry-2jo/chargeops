@@ -172,13 +172,25 @@ def git_environment(repo):
     return env
 
 
-def commit(repo, overlay, message):
-    allowed = overlay + '/kustomization.yaml'
-    changed = run('git', 'diff', '--name-only', cwd=repo).splitlines()
-    if set(changed) - {allowed}:
+def commit(repo, overlay, message, allow_gate_baseline=False):
+    allowed = {overlay + '/kustomization.yaml'}
+    changed = run('git', 'diff', 'HEAD', '--name-only', cwd=repo).splitlines()
+    gate_file = overlay + '/gate-settings.yaml'
+    if allow_gate_baseline and overlay == CANARY_DEV and gate_file in changed:
+        before = yaml.safe_load(run('git', 'show', 'HEAD:' + gate_file, cwd=repo))
+        after = yaml.safe_load((Path(repo) / gate_file).read_text(encoding='utf-8'))
+        try:
+            before['data'].pop('GATE_BASELINE_AT')
+            timestamp = after['data'].pop('GATE_BASELINE_AT')
+        except (KeyError, TypeError, AttributeError):
+            raise DeliveryPreflightError('Dev gate baseline settings are malformed') from None
+        if not re.fullmatch(r'[0-9]{10}', str(timestamp)) or before != after:
+            raise DeliveryPreflightError('Delivery may update only the Dev gate baseline timestamp, not gate policy')
+        allowed.add(gate_file)
+    if set(changed) - allowed:
         raise DeliveryPreflightError('Delivery may change only its environment image file')
     if changed:
-        run('git', 'add', '--', allowed, cwd=repo)
+        run('git', 'add', '--', *sorted(set(changed)), cwd=repo)
         run('git', '-c', 'user.name=ChargeOps CI', '-c', 'user.email=chargeops-ci@example.invalid',
             'commit', '-m', message, cwd=repo)
         run('git', 'push', 'origin', 'HEAD:main', cwd=repo, env=git_environment(repo))
@@ -245,7 +257,8 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False):
     if production_fingerprint(repo) != before:
         raise DeliveryPreflightError('Development update changed production')
     candidate['development_fingerprint'] = fingerprint(rendered(repo, DEV))
-    candidate['development_revision'] = commit(repo, DEV, f'build(dev): verify CSMS {tag}')
+    candidate['development_revision'] = commit(repo, DEV, f'build(dev): verify CSMS {tag}',
+                                              allow_gate_baseline=True)
     save(output, candidate)
     print('Development digest committed; production unchanged')
 

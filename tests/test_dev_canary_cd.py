@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 
 import pytest
+import yaml
 
 from test_env_cd import repo, A, B
 
@@ -53,8 +54,16 @@ def test_exact_rollout_readiness(monkeypatch, fault):
     assert bool(cd.dev_rollout_ready(d, B)) == (fault == 'none')
 
 
-def make_candidate(repo, tmp_path, monkeypatch):
+def make_candidate(repo, tmp_path, monkeypatch, gate_settings=False):
     shutil.copytree(repo / cd.LEGACY_DEV, repo / cd.CANARY_DEV)
+    if gate_settings:
+        directory = repo / cd.CANARY_DEV
+        (directory / 'gate-settings.yaml').write_text(yaml.safe_dump({
+            'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'name': 'csms-dev-service-gate-settings'},
+            'data': {'GATE_ENABLED': 'false', 'GATE_BASELINE_AT': '0', 'GATE_THROUGHPUT_DROP_PERCENT': '50'}}))
+        kustomization = yaml.safe_load((directory / 'kustomization.yaml').read_text())
+        kustomization['resources'].append('gate-settings.yaml')
+        (directory / 'kustomization.yaml').write_text(yaml.safe_dump(kustomization))
     cd.run('git', 'add', '.', cwd=repo)
     cd.run('git', '-c', 'core.hooksPath=/dev/null', 'commit', '-m', 'add opt-in Dev overlay', cwd=repo)
     cd.run('git', 'push', 'origin', 'main', cwd=repo)
@@ -64,6 +73,44 @@ def make_candidate(repo, tmp_path, monkeypatch):
     path = tmp_path / 'candidate.json'
     cd.prepare(repo, 'build-1-abcdef012345', 'c' * 40, path)
     return path
+
+
+def test_prepare_commits_image_and_only_baseline_timestamp_with_real_git(repo, tmp_path, monkeypatch):
+    production = cd.production_fingerprint(repo)
+    candidate = make_candidate(repo, tmp_path, monkeypatch, gate_settings=True)
+    assert cd.csms_image(repo, cd.CANARY_DEV) == B
+    settings = yaml.safe_load((repo / cd.CANARY_DEV / 'gate-settings.yaml').read_text())['data']
+    assert settings['GATE_ENABLED'] == 'false'
+    assert settings['GATE_THROUGHPUT_DROP_PERCENT'] == '50'
+    assert int(settings['GATE_BASELINE_AT']) > 0
+    assert cd.production_fingerprint(repo) == production
+    changed = cd.run('git','diff','--name-only','HEAD~1','HEAD',cwd=repo).splitlines()
+    assert set(changed) == {cd.CANARY_DEV+'/kustomization.yaml', cd.CANARY_DEV+'/gate-settings.yaml'}
+    assert not cd.run('git','status','--porcelain',cwd=repo)
+    # Recovery still updates only the image and preserves the captured baseline.
+    cd.recover_dev(repo,candidate,tmp_path/'recovery.json',timeout=1)
+    assert cd.csms_image(repo,cd.CANARY_DEV) == A
+    assert yaml.safe_load((repo/cd.CANARY_DEV/'gate-settings.yaml').read_text())['data'] == settings
+
+
+@pytest.mark.parametrize('change', ['enable', 'threshold', 'metadata', 'invalid_timestamp', 'staged_ops_file'])
+def test_baseline_exception_cannot_change_policy_or_ops(repo, tmp_path, monkeypatch, change):
+    make_candidate(repo,tmp_path,monkeypatch,gate_settings=True)
+    head = cd.run('git','rev-parse','HEAD',cwd=repo)
+    path = repo/cd.CANARY_DEV/'gate-settings.yaml'
+    document = yaml.safe_load(path.read_text())
+    document['data']['GATE_BASELINE_AT'] = str(int(document['data']['GATE_BASELINE_AT']) + 1)
+    if change == 'enable': document['data']['GATE_ENABLED'] = 'true'
+    if change == 'threshold': document['data']['GATE_THROUGHPUT_DROP_PERCENT'] = '90'
+    if change == 'metadata': document['metadata']['labels'] = {'unexpected':'change'}
+    if change == 'invalid_timestamp': document['data']['GATE_BASELINE_AT'] = 'invalid'
+    path.write_text(yaml.safe_dump(document))
+    if change == 'staged_ops_file':
+        cd.pin_image(repo,cd.PROD,B)
+        cd.run('git','add',cd.PROD+'/kustomization.yaml',cwd=repo)
+    with pytest.raises(cd.DeliveryPreflightError):
+        cd.commit(repo,cd.CANARY_DEV,'must not commit',allow_gate_baseline=True)
+    assert cd.run('git','rev-parse','HEAD',cwd=repo) == head
 
 
 def test_real_git_recovery_changes_only_dev_image_and_resumes_idempotently(repo, tmp_path, monkeypatch):
