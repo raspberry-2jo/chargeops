@@ -300,8 +300,8 @@ pipeline {
         ]) {
           script {
             if ((env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')) {
-              // Missing fixture must block before merge, rather than discovering
-              // a known configuration gap only after the approval is consumed.
+              // Existing-traffic policy needs no fixture; validate one only if
+              // the optional active smoke metric has explicitly been installed.
               sh '.ci-venv/bin/python scripts/canary_cd.py check-fixture'
               sh '.ci-venv/bin/python scripts/github_cd.py open-pr'
             } else {

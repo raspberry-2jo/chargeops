@@ -69,11 +69,19 @@ def check_application():
 
 
 def validate_ops_fixture(repo):
-    settings = next((d.get('data', {}) for d in cd.rendered(repo, cd.CANARY)
+    documents = cd.rendered(repo, cd.CANARY)
+    # The standard policy observes existing charger traffic. A reserved ID is
+    # required only when an operator explicitly adds the active smoke metric.
+    if not any(d['kind'] == 'AnalysisTemplate' and any(
+            m.get('name') == 'websocket-ocpp-smoke' for m in d.get('spec', {}).get('metrics', []))
+            for d in documents):
+        return False
+    settings = next((d.get('data', {}) for d in documents
                      if d['kind'] == 'ConfigMap' and d['metadata']['name'] == 'csms-ops-ocpp-settings'), None)
     if settings is None or (not cd.re.fullmatch(r'CI-OPS-CANARY-[A-Za-z0-9_-]{1,40}', settings.get('OCPP_TEST_CHARGER_ID', ''))
                             or settings.get('OCPP_FIXTURE_RESERVED') != 'true'):
         raise cd.DeliveryPreflightError('Ops OCPP fixture is not configured: register and exclusively reserve a CI-OPS-CANARY ID before promotion')
+    return True
 
 
 def preflight(repo, candidate_path):
@@ -266,8 +274,8 @@ def main():
     parser.add_argument('--timeout', type=int, default=1200)
     args = parser.parse_args()
     if args.command == 'check-fixture':
-        validate_ops_fixture(args.repo)
-        print('Ops fixture reservation configured; live registration and exclusivity are checked by the candidate probe')
+        active = validate_ops_fixture(args.repo)
+        print('Optional active Ops probe configured' if active else 'Ops uses existing charger metrics; no test charger ID required')
     elif args.command == 'preflight':
         preflight(args.repo, args.candidate)
     elif args.command == 'run':

@@ -75,10 +75,18 @@ def test_preflight_checks_preserved_live_runtime(repo, tmp_path, monkeypatch, dr
 @pytest.mark.parametrize('settings',[None,{}, {'OCPP_TEST_CHARGER_ID':'CH-01','OCPP_FIXTURE_RESERVED':'true'},
     {'OCPP_TEST_CHARGER_ID':'CI-OPS-CANARY-001','OCPP_FIXTURE_RESERVED':'false'}])
 def test_missing_or_unreserved_ops_fixture_blocks_before_cluster_or_git_mutation(monkeypatch,settings):
-    docs=[] if settings is None else [{'kind':'ConfigMap','metadata':{'name':'csms-ops-ocpp-settings'},'data':settings}]
+    docs=[{'kind':'AnalysisTemplate','spec':{'metrics':[{'name':'websocket-ocpp-smoke'}]}}]
+    if settings is not None:
+        docs.append({'kind':'ConfigMap','metadata':{'name':'csms-ops-ocpp-settings'},'data':settings})
     monkeypatch.setattr(cd,'rendered',lambda *args:docs)
     monkeypatch.setattr(cd,'load',lambda *args:pytest.fail('Fixture must block before candidate/cluster mutation'))
     with pytest.raises(cd.DeliveryPreflightError,match='Ops OCPP fixture'):canary.preflight('repo','candidate')
+
+
+def test_existing_traffic_policy_needs_no_reserved_charger(monkeypatch):
+    monkeypatch.setattr(cd, 'rendered', lambda *args: [
+        {'kind':'AnalysisTemplate','spec':{'metrics':[{'name':'five-level-service-gate'}]}}])
+    assert canary.validate_ops_fixture('repo') is False
 
 
 def test_changed_canary_policy_cannot_be_approved(repo, tmp_path, monkeypatch):
