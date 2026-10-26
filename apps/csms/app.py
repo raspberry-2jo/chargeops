@@ -24,6 +24,7 @@ from psycopg_pool import AsyncConnectionPool
 from websockets.asyncio.server import serve
 from csms.http_metrics import HTTPMetricsMiddleware
 from csms.ocpp_metrics import OcppMetrics
+from csms.dev_simulation import simulation_ids
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("csms")
@@ -32,6 +33,11 @@ logging.getLogger("ocpp").setLevel(logging.WARNING)   # 메시지 원문 로그�
 DB_DSN = os.environ["DB_DSN"]                     # PgBouncer(쓰기 풀) 접속 문자열 — 주소 두 개 + target_session_attrs=read-write
 API_TOKEN = os.environ.get("API_TOKEN", "")       # 봇 → CSMS 내부 호출 인증
 REQUIRE_CN = os.environ.get("REQUIRE_CN", "true") == "true"
+DEV_SIMULATION_IDS = simulation_ids(os.environ)
+
+
+def is_simulated(cid):
+    return cid in DEV_SIMULATION_IDS
 HEARTBEAT = int(os.environ.get("HEARTBEAT_INTERVAL", "30"))
 OCPP_PORT = int(os.environ.get("OCPP_PORT", "9000"))           # K8s: Service 가 30900 → 9000, 시뮬레이션: 30900 직접
 RESET_LIMIT_PER_HOUR = 3
@@ -61,6 +67,8 @@ ocpp_metrics = OcppMetrics()
 h_ocpp = Histogram("chargeops_ocpp_handle_seconds", "OCPP 메시지 처리 시간 (받기 → 응답, DB 쓰기 포함)", ["action"],
                    buckets=(.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10))
 c_conn = Counter("chargeops_ocpp_connections_total", "WebSocket 접속 결과", ["event"])   # accepted · rejected · closed
+for event in ("accepted", "rejected", "closed"):
+    c_conn.labels(event).inc(0)
 g_pod = Gauge("chargeops_csms_connections", "이 파드에 붙어 있는 충전기 수")
 c_fwd = Counter("chargeops_csms_forward_total", "다른 파드로 넘긴 복구 명령", ["result"])  # ok · error · not_found
 
@@ -105,7 +113,8 @@ class ChargePoint(OcppChargePoint):
         c_msg.labels("Heartbeat").inc()
         with h_ocpp.labels("Heartbeat").time():
             g_hb.labels(**self.labels()).set(time.time())
-            await db("UPDATE charger_status_current SET last_heartbeat_at = now() WHERE charger_id = %s", (self.id,))
+            if not is_simulated(self.id):
+                await db("UPDATE charger_status_current SET last_heartbeat_at = now() WHERE charger_id = %s", (self.id,))
         return call_result.Heartbeat(current_time=now().isoformat())
 
     @on("StatusNotification")
@@ -134,9 +143,10 @@ class ChargePoint(OcppChargePoint):
                 g_cur.labels(**self.labels()).set(cur)
             if temp is not None:
                 g_temp.labels(**self.labels()).set(temp)
-            await db("""INSERT INTO meter_sample (charger_id, ts, current_a, voltage_v, temp_c, energy_wh)
-                        VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING""",
-                     (self.id, mv["timestamp"], cur, volt, temp, None if energy is None else int(energy)))
+            if not is_simulated(self.id):
+                await db("""INSERT INTO meter_sample (charger_id, ts, current_a, voltage_v, temp_c, energy_wh)
+                            VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING""",
+                         (self.id, mv["timestamp"], cur, volt, temp, None if energy is None else int(energy)))
 
 
 async def record_status(cid: str, status: str, error_code: str | None, ts: str | None):
@@ -149,8 +159,9 @@ async def record_status(cid: str, status: str, error_code: str | None, ts: str |
     g_charging.labels(**lab).set(1 if status == "Charging" else 0)
     st["status"], st["status_at"], st["err"] = status, time.time(), err   # 메모리는 지표 · 조회용으로만
     code = OCPP_CODE.get(status, "9")
-    changed = (await db("SELECT fn_record_status(%s, %s, %s, %s::timestamptz, %s)",
-                        (cid, code, err, ts or now().isoformat(), st["source"]), "one"))[0]
+    changed = st.get("code") != code if is_simulated(cid) else (await db(
+        "SELECT fn_record_status(%s, %s, %s, %s::timestamptz, %s)",
+        (cid, code, err, ts or now().isoformat(), st["source"]), "one"))[0]
     if changed:
         st["code"] = code
         if status == "Faulted":
@@ -160,6 +171,8 @@ async def record_status(cid: str, status: str, error_code: str | None, ts: str |
 
 async def load_charger(cid: str) -> dict | None:
     """등록된 모형 · 가상 충전기만 (공공 충전기 ID · 모르는 ID 는 None → 접속 거부)"""
+    if is_simulated(cid):
+        return {"station_id": "CI-DEV-SIMULATION", "rated": 32, "source": "virtual", "code": None}
     row = await db("""SELECT c.station_id, coalesce(c.rated_current_a, 32), c.source, cur.status_code
                       FROM charger c LEFT JOIN charger_status_current cur USING (charger_id)
                       WHERE c.charger_id = %s AND c.source IN ('model', 'virtual') AND NOT c.is_deleted""",
@@ -190,7 +203,8 @@ async def on_connect(ws):
     state[cid] = {**state.get(cid, {}), **info}
     cp = ChargePoint(cid, ws, response_timeout=10)          # 충전기 무응답 시 10초 후 실패 처리
     session = str(uuid.uuid4())
-    await db("SELECT fn_session_open(%s, %s::uuid, %s, %s)", (cid, session, POD, POD_IP))   # 최신 세션 = 나
+    if not is_simulated(cid):
+        await db("SELECT fn_session_open(%s, %s::uuid, %s, %s)", (cid, session, POD, POD_IP))   # 최신 세션 = 나
     connected[cid] = cp
     lab = cp.labels()
     g_connected.labels(**lab).set(1)
@@ -211,7 +225,8 @@ async def on_connect(ws):
         g_charging.labels(**lab).set(0)
         # C-02 통신 두절: DB 의 최신 세션이 나일 때만 기록. 다른 파드에 새 세션이 있으면 건너뜀 (가짜 통신이상 방지)
         try:
-            closed = (await db("SELECT fn_session_close(%s, %s::uuid, %s)", (cid, session, state[cid]["source"]), "one"))[0]
+            closed = connected.get(cid) is None if is_simulated(cid) else (await db(
+                "SELECT fn_session_close(%s, %s::uuid, %s)", (cid, session, state[cid]["source"]), "one"))[0]
         except Exception as e:
             closed = False
             log.warning("session close %s 실패: %s", cid, e)
