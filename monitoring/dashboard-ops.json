@@ -526,7 +526,7 @@
       "id": 7,
       "type": "stat",
       "title": "$charger",
-      "description": "상태 · 원인 / 전류 / 온도 / 이상 점수(0.6 주의 · 0.8 경고) / 오늘 가동률",
+      "description": "상태 · 전압(노랑) · 전류(주황) · 온도(빨강 글자, 55 ℃ 주의 · 60 ℃ 경고) · 이상 점수(0.6 주의 · 0.8 경고) · 오늘 가동률. 전압 · 전류는 최근 10분 안 최신 측정값",
       "repeat": "charger",
       "repeatDirection": "h",
       "maxPerRow": 3,
@@ -543,27 +543,34 @@
       "targets": [
         {
           "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
           "format": "table",
           "rawQuery": true,
           "editorMode": "code",
-          "rawSql": "SELECT state AS \"상태\", current_a AS \"전류\", temp_c AS \"온도\", anomaly AS \"이상 점수\", uptime_today AS \"오늘 가동\" FROM v_charger_card WHERE charger_id = '$charger'"
+          "rawSql": "SELECT c.state AS \"상태\", m.voltage_v AS \"전압\", m.current_a * 1000 AS \"전류\", c.temp_c::float AS \"온도\", c.anomaly::float AS \"이상 점수\", c.uptime_today::float AS \"오늘 가동\" FROM v_charger_card c LEFT JOIN LATERAL (SELECT s.voltage_v, s.current_a FROM meter_sample s WHERE s.charger_id = c.charger_id AND s.ts > now() - interval '10 minutes' ORDER BY s.ts DESC LIMIT 1) m ON true WHERE c.charger_id = '$charger'"
         }
       ],
       "options": {
-        "colorMode": "value",
         "graphMode": "none",
+        "colorMode": "value",
         "textMode": "value_and_name",
         "justifyMode": "center",
         "orientation": "vertical",
+        "wideLayout": true,
+        "showPercentChange": false,
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
           ],
+          "values": false,
           "fields": "/.*/"
         },
         "text": {
           "titleSize": 11,
-          "valueSize": 18
+          "valueSize": 20
         }
       },
       "fieldConfig": {
@@ -653,35 +660,45 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "전압"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "volt"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FACC15"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "전류"
             },
             "properties": [
               {
                 "id": "unit",
-                "value": "amp"
+                "value": "mamp"
               },
               {
                 "id": "decimals",
-                "value": 1
+                "value": 2
               },
               {
-                "id": "thresholds",
+                "id": "color",
                 "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "#C9CED6",
-                      "value": null
-                    },
-                    {
-                      "color": "#D29922",
-                      "value": 32
-                    },
-                    {
-                      "color": "#F85149",
-                      "value": 38.4
-                    }
-                  ]
+                  "mode": "fixed",
+                  "fixedColor": "#FB923C"
                 }
               }
             ]
@@ -698,26 +715,13 @@
               },
               {
                 "id": "decimals",
-                "value": 0
+                "value": 1
               },
               {
-                "id": "thresholds",
+                "id": "color",
                 "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    {
-                      "color": "#C9CED6",
-                      "value": null
-                    },
-                    {
-                      "color": "#D29922",
-                      "value": 55
-                    },
-                    {
-                      "color": "#F85149",
-                      "value": 60
-                    }
-                  ]
+                  "mode": "fixed",
+                  "fixedColor": "#F87171"
                 }
               }
             ]
@@ -797,15 +801,15 @@
       "id": 8,
       "type": "timeseries",
       "title": "$charger · 30분 흐름",
-      "description": "청록 = 전류, 회색 점선 = 온도(오른쪽 축), 회색 가는 점선 = 정격 전류",
+      "description": "주황 실선 = 전류(왼쪽 축 0~3 mA, 넘으면 자동 확장, 부하를 꽂고 빼면 계단) · 빨강 점선 = 온도(오른쪽 축 15~45 ℃)",
       "repeat": "charger",
       "repeatDirection": "h",
       "maxPerRow": 3,
       "timeFrom": "30m",
       "hideTimeOverride": true,
       "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
+        "type": "datasource",
+        "uid": "-- Mixed --"
       },
       "gridPos": {
         "x": 0,
@@ -816,28 +820,34 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (charger_id) (chargeops_charger_current_amperes{charger_id=\"$charger\"})",
-          "legendFormat": "전류(A)"
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT ts AS time, current_a * 1000 AS \"전류\" FROM meter_sample WHERE charger_id = '$charger' AND $__timeFilter(ts) ORDER BY 1"
         },
         {
           "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
           "expr": "max by (charger_id) (chargeops_charger_temp_celsius{charger_id=\"$charger\"})",
-          "legendFormat": "온도(℃)"
-        },
-        {
-          "refId": "C",
-          "expr": "max by (charger_id) (chargeops_charger_rated_current_amperes{charger_id=\"$charger\"})",
-          "legendFormat": "정격(A)"
+          "legendFormat": "온도"
         }
       ],
       "options": {
         "legend": {
+          "showLegend": true,
           "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
+          "placement": "bottom"
         },
         "tooltip": {
-          "mode": "multi"
+          "mode": "multi",
+          "sort": "none"
         }
       },
       "fieldConfig": {
@@ -846,48 +856,69 @@
             "lineWidth": 2,
             "fillOpacity": 0,
             "showPoints": "never",
-            "spanNulls": 60000
+            "spanNulls": 60000,
+            "axisGridShow": true
           }
         },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "전류(A)"
+              "options": "전류"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
                   "mode": "fixed",
-                  "fixedColor": "#22D3EE"
+                  "fixedColor": "#FB923C"
                 }
               },
               {
                 "id": "unit",
-                "value": "amp"
+                "value": "mamp"
               },
               {
-                "id": "min",
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "left"
+              },
+              {
+                "id": "custom.axisSoftMin",
                 "value": 0
               },
               {
                 "id": "custom.axisSoftMax",
-                "value": 40
+                "value": 3
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "stepAfter"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 12
+              },
+              {
+                "id": "custom.gradientMode",
+                "value": "opacity"
               }
             ]
           },
           {
             "matcher": {
               "id": "byName",
-              "options": "온도(℃)"
+              "options": "온도"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
                   "mode": "fixed",
-                  "fixedColor": "#8A919C"
+                  "fixedColor": "#F87171"
                 }
               },
               {
@@ -895,16 +926,24 @@
                 "value": "celsius"
               },
               {
-                "id": "custom.axisSoftMin",
-                "value": 20
-              },
-              {
-                "id": "custom.axisSoftMax",
-                "value": 70
+                "id": "decimals",
+                "value": 0
               },
               {
                 "id": "custom.axisPlacement",
                 "value": "right"
+              },
+              {
+                "id": "custom.axisSoftMin",
+                "value": 15
+              },
+              {
+                "id": "custom.axisSoftMax",
+                "value": 45
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
               },
               {
                 "id": "custom.lineStyle",
@@ -917,50 +956,22 @@
                 }
               }
             ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "정격(A)"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#4B5563"
-                }
-              },
-              {
-                "id": "unit",
-                "value": "amp"
-              },
-              {
-                "id": "min",
-                "value": 0
-              },
-              {
-                "id": "custom.axisSoftMax",
-                "value": 40
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 1
-              },
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "fill": "dash",
-                  "dash": [
-                    3,
-                    3
-                  ]
-                }
-              }
-            ]
           }
         ]
       }
+    },
+    {
+      "id": 61,
+      "type": "row",
+      "title": "공공 API · 제주 충전기 (참고)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
     },
     {
       "id": 9,
@@ -973,7 +984,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 19,
+        "y": 20,
         "w": 6,
         "h": 5
       },
@@ -1032,7 +1043,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 19,
+        "y": 20,
         "w": 6,
         "h": 5
       },
@@ -1113,7 +1124,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 19,
+        "y": 20,
         "w": 5,
         "h": 5
       },
@@ -1206,7 +1217,7 @@
       },
       "gridPos": {
         "x": 17,
-        "y": 19,
+        "y": 20,
         "w": 7,
         "h": 5
       },
@@ -1302,7 +1313,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 24,
+        "y": 25,
         "w": 14,
         "h": 12
       },
@@ -1456,7 +1467,7 @@
       },
       "gridPos": {
         "x": 14,
-        "y": 24,
+        "y": 25,
         "w": 10,
         "h": 4
       },
@@ -1534,7 +1545,7 @@
       },
       "gridPos": {
         "x": 14,
-        "y": 28,
+        "y": 29,
         "w": 10,
         "h": 8
       },
@@ -1662,7 +1673,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 36,
+        "y": 37,
         "w": 8,
         "h": 5
       },
@@ -1749,7 +1760,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 36,
+        "y": 37,
         "w": 16,
         "h": 5
       },
@@ -1838,7 +1849,7 @@
       "collapsed": true,
       "gridPos": {
         "x": 0,
-        "y": 41,
+        "y": 42,
         "w": 24,
         "h": 1
       },
@@ -1853,7 +1864,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 42,
+            "y": 43,
             "w": 12,
             "h": 8
           },
@@ -1909,7 +1920,8 @@
                 ]
               }
             ]
-          }
+          },
+          "description": "모형 충전기를 밤에 꺼 두는 시간도 다운으로 계산 (예: 10/22 CH-02 19:09 통신이상 → 다음 날 09:01 복귀). 실제 장애 시간은 MTTR 패널 참고"
         },
         {
           "id": 22,
@@ -1921,7 +1933,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 42,
+            "y": 43,
             "w": 12,
             "h": 8
           },
@@ -1978,7 +1990,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 50,
+            "y": 51,
             "w": 24,
             "h": 7
           },
@@ -2056,7 +2068,7 @@
       "collapsed": true,
       "gridPos": {
         "x": 0,
-        "y": 42,
+        "y": 43,
         "w": 24,
         "h": 1
       },
@@ -2071,7 +2083,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 43,
+            "y": 44,
             "w": 16,
             "h": 10
           },
@@ -2180,7 +2192,7 @@
           },
           "gridPos": {
             "x": 16,
-            "y": 43,
+            "y": 44,
             "w": 8,
             "h": 10
           },
@@ -2210,7 +2222,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 53,
+            "y": 54,
             "w": 24,
             "h": 6
           },
@@ -2244,7 +2256,7 @@
       "collapsed": true,
       "gridPos": {
         "x": 0,
-        "y": 43,
+        "y": 44,
         "w": 24,
         "h": 1
       },
@@ -2259,7 +2271,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 44,
+            "y": 45,
             "w": 12,
             "h": 7
           },
@@ -2290,7 +2302,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 44,
+            "y": 45,
             "w": 12,
             "h": 7
           },
@@ -2312,7 +2324,7 @@
           },
           "gridPos": {
             "x": 0,
-            "y": 51,
+            "y": 52,
             "w": 12,
             "h": 7
           },
@@ -2343,7 +2355,7 @@
           },
           "gridPos": {
             "x": 12,
-            "y": 51,
+            "y": 52,
             "w": 12,
             "h": 7
           },
@@ -2370,7 +2382,7 @@
       "panels": [],
       "gridPos": {
         "x": 0,
-        "y": 44,
+        "y": 45,
         "w": 24,
         "h": 1
       }
@@ -2399,7 +2411,7 @@
       ],
       "gridPos": {
         "x": 0,
-        "y": 45,
+        "y": 46,
         "w": 6,
         "h": 5
       },
@@ -2450,7 +2462,7 @@
       "id": 47,
       "type": "stat",
       "title": "MTTR 중앙값 (7일)",
-      "description": "부하 시험일 같은 튀는 날에 흔들리지 않게 중앙값으로 표시",
+      "description": "긴 장애 1건에 흔들리지 않게 7일 일별 MTTR 의 중앙값으로 표시 (실물 모형 기준)",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "chargeops-db"
@@ -2470,7 +2482,7 @@
       ],
       "gridPos": {
         "x": 6,
-        "y": 45,
+        "y": 46,
         "w": 6,
         "h": 5
       },
@@ -2512,7 +2524,7 @@
       "id": 48,
       "type": "timeseries",
       "title": "MTTR — 우리 충전기 (일별, 분)",
-      "description": "우리가 처리한 장애 기준. 10/21은 가상 충전기 부하 시험일이라 크게 튐",
+      "description": "실물 모형(CH-01~03)에서 해소된 장애 기준. 10/21 은 밤사이 통신 두절 1건(891분)이 포함돼 크게 튐",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "chargeops-db"
@@ -2533,7 +2545,7 @@
       "timeFrom": "14d",
       "gridPos": {
         "x": 12,
-        "y": 45,
+        "y": 46,
         "w": 12,
         "h": 5
       },
