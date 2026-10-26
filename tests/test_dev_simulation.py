@@ -44,14 +44,16 @@ def app_handlers():
             await self.on_heartbeat()
             await self.on_status(1, 'NoError', 'Available')
             await self.on_meter(1, [{'timestamp': '2026-10-26T00:00:00Z',
-                'sampled_value': [{'measurand': 'Current.Import', 'value': '0'}]}])
+                'sampled_value': [{'measurand': 'Current.Import', 'value': '0'},
+                                  {'measurand': 'Voltage', 'value': '221.5'},
+                                  {'measurand': 'Energy.Active.Import.Register', 'value': '123.4'}]}])
     ns = dict(DEV_SIMULATION_IDS={'CI-DEV-SIM-01'}, OcppChargePoint=CP,
               call_result=SimpleNamespace(**{name: lambda **kw: kw for name in
                   ['BootNotification', 'Heartbeat', 'StatusNotification', 'MeterValues']}),
               db=AsyncMock(side_effect=AssertionError('unexpected DB access')), state={}, connected={},
               OCPP_CODE={'Available': '2'}, REQUIRE_CN=False, HEARTBEAT=30, POD='dev-pod', POD_IP='127.0.0.1',
               time=time, uuid=uuid, log=logging.getLogger('test'), now=lambda: datetime.now(timezone.utc))
-    for name in ['c_msg', 'h_ocpp', 'g_hb', 'g_cur', 'g_temp', 'g_faulted', 'g_charging',
+    for name in ['c_msg', 'h_ocpp', 'g_hb', 'g_cur', 'g_temp', 'g_volt', 'g_energy', 'g_faulted', 'g_charging',
                  'c_fault', 'c_conn', 'g_connected', 'g_rated']:
         ns[name] = MagicMock()
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(ROOT / 'app.py'), 'exec'), ns)
@@ -69,6 +71,8 @@ def test_allowlisted_charger_full_lifecycle_never_accesses_db():
     ns['g_connected'].labels.return_value.set.assert_any_call(1)
     ns['g_connected'].labels.return_value.set.assert_any_call(0)
     assert ns['c_msg'].labels.call_count == 4
+    ns['g_volt'].labels.return_value.set.assert_called_once_with(221.5)
+    ns['g_energy'].labels.return_value.set.assert_called_once_with(123.4)
 
 
 def test_other_chargers_still_require_registration_and_persist_data():
