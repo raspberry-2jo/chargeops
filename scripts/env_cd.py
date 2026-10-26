@@ -234,6 +234,13 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False):
         candidate.update(development_mode='canary', previous_development_image=previous)
     if canary:
         candidate['canary_fingerprint'] = fingerprint(rendered(repo, CANARY))
+    # A fixed pre-delivery timestamp is reused by all Canary analysis steps.
+    # Keep the operator's enable flag; never fabricate a baseline during analysis.
+    gate_settings = Path(repo) / DEV / 'gate-settings.yaml'
+    if DEV == CANARY_DEV and gate_settings.exists():
+        settings = yaml.safe_load(gate_settings.read_text(encoding='utf-8'))
+        settings['data']['GATE_BASELINE_AT'] = str(int(time.time()))
+        gate_settings.write_text(yaml.safe_dump(settings, sort_keys=False), encoding='utf-8')
     pin_image(repo, DEV, candidate['image'])
     if production_fingerprint(repo) != before:
         raise DeliveryPreflightError('Development update changed production')

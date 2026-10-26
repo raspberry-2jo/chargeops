@@ -25,6 +25,7 @@ from websockets.asyncio.server import serve
 from csms.http_metrics import HTTPMetricsMiddleware
 from csms.ocpp_metrics import OcppMetrics
 from csms.dev_simulation import simulation_ids
+from csms.connection_metrics import ConnectionMetrics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("csms")
@@ -65,6 +66,8 @@ c_fault = Counter("chargeops_charger_fault_total", "Faulted 진입 횟수", L)
 c_reset = Counter("chargeops_reset_total", "리셋 요청 결과", ["type", "result"])
 c_msg = Counter("chargeops_ocpp_messages_total", "수신 OCPP 메시지", ["action"])
 ocpp_metrics = OcppMetrics()
+connection_metrics = ConnectionMetrics()
+draining = False
 # 3파드 시험용 (최종 발표안 7장 1번): 처리 지연 p95 · 접속/끊김 · 파드별 연결 수 · 파드 간 전달
 h_ocpp = Histogram("chargeops_ocpp_handle_seconds", "OCPP 메시지 처리 시간 (받기 → 응답, DB 쓰기 포함)", ["action"],
                    buckets=(.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10))
@@ -211,16 +214,22 @@ async def on_connect(ws):
     session = str(uuid.uuid4())
     if not is_simulated(cid):
         await db("SELECT fn_session_open(%s, %s::uuid, %s, %s)", (cid, session, POD, POD_IP))   # 최신 세션 = 나
+    fixture = is_simulated(cid) and cid == 'CI-DEV-CANARY-01'
+    connection_metrics.opened(cid, fixture=fixture)
     connected[cid] = cp
     lab = cp.labels()
     g_connected.labels(**lab).set(1)
     g_rated.labels(**lab).set(state[cid]["rated"])
     g_hb.labels(**lab).set(time.time())
+    handler_error = False
     try:
         await cp.start()                                      # 연결이 끊길 때까지 메시지 수신 루프
     except Exception as e:
+        handler_error = not type(e).__name__.startswith('ConnectionClosed')
         log.info("disconnect %s: %s", cid, type(e).__name__)
     finally:
+        connection_metrics.closed(getattr(ws, 'close_code', None), draining=draining,
+                                  fixture=fixture, handler_error=handler_error)
         c_conn.labels("closed").inc()
         if connected.get(cid) is cp:
             connected.pop(cid, None)
@@ -399,7 +408,8 @@ async def verify_reset(cid: str, req: ResetReq, started: float):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pool
+    global pool, draining
+    draining = False
     # prepare_threshold=None: PgBouncer 트랜잭션 풀링에서 서버측 prepared statement 충돌 방지
     # check: 빌려주기 전에 연결이 살아 있는지 확인 → 장애 전환 뒤 죽은 연결(옛 Primary 쪽)을 버리고 새로 붙는다
     #   (실습 실측: check 없이 DSN 만 바꾸면 끊긴 연결을 받은 요청이 실패, 있으면 실패 0 — 가이드 9.4)
@@ -419,6 +429,7 @@ async def lifespan(app: FastAPI):
     yield
     # 끝날 때: 새 접속은 그만 받고, 붙어 있던 충전기는 DRAIN_SECONDS 에 걸쳐 나눠 닫는다 (1012 = 서버 재시작)
     #   한꺼번에 닫으면 수천 대가 같은 순간 다시 붙어 남은 파드 · edge 가 점검 시간 초과 (10/15 1,400대 실측)
+    draining = True
     ws_server.close(close_connections=False)
     cps = list(connected.values())
     if cps:
