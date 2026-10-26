@@ -71,6 +71,46 @@ def preview_receipts(tmp_path):
     return candidate,path
 
 
+@pytest.mark.parametrize('change', ['none','merged','closed','head','branch','repo','new_build','receipt','api_error'])
+def test_timeout_closes_only_the_owned_unchanged_open_pr(tmp_path,monkeypatch,change):
+    from types import SimpleNamespace
+    now=[0];calls=[];build='https://jenkins.invalid/job/chargeops-ci/60/'
+    monkeypatch.setenv('BUILD_URL',build)
+    monkeypatch.setenv('CHECKOUT_BRANCH','kim_chanju')
+    monkeypatch.delenv('CHANGE_ID',raising=False)
+    monkeypatch.setattr(github,'time',SimpleNamespace(time=lambda:1000,monotonic=lambda:now[0],
+        sleep=lambda seconds:now.__setitem__(0,now[0]+seconds)))
+    candidate,pr_path=preview_receipts(tmp_path)
+    saved=cd.load(pr_path);saved['build_url']=build if change!='receipt' else build+'other'
+    cd.save(pr_path,saved)
+    cp,rp=tmp_path/'candidate.json',tmp_path/'verification.json'
+    cd.save(cp,candidate)
+    cd.save(rp,{'candidate':cd.fingerprint(candidate),'image':B,'verified_at':1000})
+    pr={'state':'open','merged':False,'body':'<!-- chargeops-preview-build: '+build+' -->',
+        'head':{'sha':HEAD,'ref':'kim_chanju','repo':{'full_name':github.REPOSITORY}},
+        'base':{'ref':'dev','repo':{'full_name':github.REPOSITORY}}}
+    def api(method,path,data=None):
+        calls.append((method,path,data))
+        # Change only on the final GET, after the deadline is reached.
+        if method=='GET' and now[0]>=2:
+            if change=='merged':pr['merged']=True
+            if change=='closed':pr['state']='closed'
+            if change=='head':pr['head']['sha']='f'*40
+            if change=='branch':pr['base']['ref']='main'
+            if change=='repo':pr['head']['repo']['full_name']='other/repo'
+            if change=='new_build':pr['body']='new owner'
+            if change=='api_error':raise RuntimeError('not printed')
+        if method=='PATCH':
+            assert data=={'state':'closed'}
+            return {'state':'closed','merged':False}
+        return pr
+    monkeypatch.setattr(github,'api',api)
+    with pytest.raises(cd.DeliveryPreflightError,match='wait timed out'):
+        github.wait_for_merge(cp,rp,pr_path,tmp_path/'approval.json',timeout=2,interval=1)
+    assert sum(method=='PATCH' for method,_,_ in calls)==(1 if change=='none' else 0)
+    assert not (tmp_path/'approval.json').exists()
+
+
 @pytest.mark.parametrize('same_apps',[True,False])
 def test_single_build_binds_reviewed_merge_to_exact_verified_apps_tree(tmp_path,monkeypatch,same_apps):
     fixture_api(monkeypatch)
@@ -179,6 +219,8 @@ def test_approval_cannot_be_bypassed(monkeypatch, case):
 
 @pytest.mark.parametrize('existing', [False, True])
 def test_verified_preview_opens_or_reuses_one_pr_without_merging(repo, tmp_path, monkeypatch, existing):
+    build='https://jenkins.invalid/job/chargeops-ci/61/'
+    monkeypatch.setenv('BUILD_URL',build)
     candidate = prepared(repo, tmp_path, monkeypatch)
     receipt = tmp_path / 'receipt.json'
     cd.save(receipt, receipt_for(candidate))
@@ -203,6 +245,9 @@ def test_verified_preview_opens_or_reuses_one_pr_without_merging(repo, tmp_path,
     output = tmp_path / 'pr.json'
     result = github.open_pr(repo, candidate, receipt, output)
     assert cd.load(output) == result
+    assert result['build_url']==build
+    assert any('<!-- chargeops-preview-build: '+build+' -->' in (data or {}).get('body','')
+               for method,_,data in calls if method in ('PATCH','POST'))
     assert sum(method == 'POST' for method, _, _ in calls) == (0 if existing else 1)
     assert sum(method == 'PATCH' for method, _, _ in calls) == (1 if existing else 0)
     assert cd.csms_image(repo, cd.PROD) == A

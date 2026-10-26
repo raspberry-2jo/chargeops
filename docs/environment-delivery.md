@@ -14,6 +14,11 @@ chargeops/kim_chanju Push → CI·이미지 Push
 ```
 
 Approve만으로는 진행하지 않는다. Merge까지 완료해야 하며 최대 45분 기다린다.
+45분 내 승인·Merge가 완료되지 않으면 해당 빌드의 열린 PR을 자동으로 닫고 실패 처리한다.
+닫기 직전에 PR을 다시 조회하여 source SHA·kim_chanju→dev·저장소·빌드 소유 표시를 확인한다.
+이미 Merge/Close됐거나 새 커밋·다른 빌드 소유 표시가 있으면 닫지 않는다.
+GitHub API 오류로 닫기에 실패해도 Ops는 승격하지 않으며 콘솔에 확인 메시지를 남긴다.
+이 동작은 새 코드로 시작한 빌드의 승인 대기 시간 초과에만 적용하며, 다른 실패나 수동 취소에는 적용하지 않는다.
 대기 중 빌드는 실행 상태이고 mgmt-agent executor를 점유한다. 승인·Merge는 사람이 수행한다.
 별도 dev 브랜치 배포 Job이나 Jenkins input 승인은 필요 없다. 기존 chargeops-ops-ci 또는 chargeops-ci-dev는 중지한다.
 새 Jenkinsfile로 dev 브랜치를 실행하면 CI만 수행하며 이미지 게시·환경 배포는 하지 않는다.

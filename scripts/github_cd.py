@@ -124,6 +124,31 @@ def approved_candidate(candidate, pr_path='artifacts/pull-request.json'):
     return result
 
 
+def close_expired_pr(candidate, saved):
+    """Close only the still-open PR owned by this preview build."""
+    build = os.environ.get('BUILD_URL', '')
+    if not build or saved.get('build_url') != build:
+        return 'SKIP: PR has no matching build ownership receipt'
+    path = '/repos/' + REPOSITORY + '/pulls/' + str(int(saved['number']))
+    pr = api('GET', path)
+    if pr.get('merged') or pr.get('state') != 'open':
+        return 'SKIP: PR already merged or closed'
+    head, base = pr.get('head', {}), pr.get('base', {})
+    if (saved.get('source') != candidate['source'] or saved.get('image') != candidate['image']
+            or head.get('sha') != candidate['source']
+            or head.get('ref') != 'kim_chanju' or base.get('ref') != 'dev'
+            or head.get('repo', {}).get('full_name') != REPOSITORY
+            or base.get('repo', {}).get('full_name') != REPOSITORY
+            or '<!-- chargeops-preview-build: ' + build + ' -->' not in (pr.get('body') or '')):
+        return 'SKIP: PR source, branches or build ownership changed'
+    result = api('PATCH', path, {'state': 'closed'})
+    if result.get('merged'):
+        return 'SKIP: PR merged while timeout cleanup was running'
+    if result.get('state') != 'closed':
+        raise cd.DeliveryPreflightError('GitHub did not confirm PR closure')
+    return 'CLOSED: source PR #' + str(saved['number']) + ' after approval/merge timeout'
+
+
 def wait_for_merge(candidate_path, receipt_path, pr_path, output, timeout=2700, interval=15):
     if os.environ.get('CHECKOUT_BRANCH') != 'kim_chanju' or os.environ.get('CHANGE_ID'):
         raise cd.DeliveryPreflightError('Only the original trusted preview build may wait for source approval')
@@ -146,6 +171,10 @@ def wait_for_merge(candidate_path, receipt_path, pr_path, output, timeout=2700, 
         if pr.get('state') == 'closed':
             raise cd.DeliveryPreflightError('Source PR closed without merge; Ops unchanged')
         time.sleep(interval)
+    try:
+        print(close_expired_pr(candidate, saved), flush=True)
+    except Exception as error:
+        print('Unable to close timed-out PR: ' + type(error).__name__ + '; inspect GitHub permissions', flush=True)
     raise cd.DeliveryPreflightError('Source approval/merge wait timed out; Ops unchanged')
 
 
@@ -190,6 +219,11 @@ def source_pr(source, output, body, image=None):
     head = api('GET', '/repos/' + REPOSITORY + '/git/ref/heads/kim_chanju')
     if head.get('object', {}).get('sha') != source:
         raise cd.DeliveryPreflightError('The source branch advanced; verify the new head before opening its PR')
+    build = os.environ.get('BUILD_URL', '')
+    if re.fullmatch(r'https?://[^\s<>]+', build):
+        body += '\n\n<!-- chargeops-preview-build: ' + build + ' -->'
+    else:
+        build = ''
     root = '/repos/' + REPOSITORY + '/pulls'
     existing = list(pages(root + '?' + urlencode({'state': 'open', 'base': 'dev', 'head': 'raspberry-2jo:kim_chanju'})))
     if len(existing) > 1:
@@ -205,6 +239,8 @@ def source_pr(source, output, body, image=None):
     if pr.get('head', {}).get('sha') != source:
         raise cd.DeliveryPreflightError('PR head changed during creation; its new head must pass Dev checks')
     result = {'number': pr['number'], 'url': pr['html_url'], 'source': source}
+    if build:
+        result['build_url'] = build
     if image:
         result['image'] = image
     cd.save(output, result)

@@ -325,7 +325,8 @@ pipeline {
         }
       }
       steps {
-        timeout(time: 46, unit: 'MINUTES') {
+        // 45m approval wait plus bounded final GitHub lookup/PR closure.
+        timeout(time: 48, unit: 'MINUTES') {
           withCredentials([string(credentialsId: params.GITHUB_PR_CREDENTIAL_ID.trim(), variable: 'GITHUB_PR_TOKEN')]) {
             sh '.ci-venv/bin/python scripts/github_cd.py wait-merge --timeout 2700'
           }
