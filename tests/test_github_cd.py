@@ -46,6 +46,24 @@ def test_reviewed_current_dev_merge_is_accepted(monkeypatch):
     assert github.approved_merge(SOURCE)['approvers'] == ['reviewer']
 
 
+def test_pr_api_contract_retains_merge_commit_provenance(monkeypatch):
+    # Reproduce the live schema difference without credentials or network calls.
+    class Response:
+        def __init__(self, payload): self.payload = payload
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self): return json.dumps(self.payload).encode()
+    class Opener:
+        def open(self, request, **kwargs):
+            document = pull()
+            if request.get_header('X-github-api-version') != '2022-11-28':
+                document.pop('merge_commit_sha')
+            return Response(document)
+    monkeypatch.setenv('GITHUB_PR_TOKEN','test-token')
+    monkeypatch.setattr(github,'build_opener',lambda *args:Opener())
+    assert github.api('GET','/repos/'+github.REPOSITORY+'/pulls/12')['merge_commit_sha'] == SOURCE
+
+
 def test_read_only_outsider_approval_does_not_authorize_ops(monkeypatch):
     fixture_api(monkeypatch)
     original = github.api

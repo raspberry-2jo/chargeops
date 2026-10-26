@@ -32,7 +32,9 @@ def api(method, path, data=None):
     request = Request('https://api.github.com' + path, method=method,
                       data=None if data is None else json.dumps(data).encode(), headers={
         'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
-        'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2026-03-10'})
+        # The merge-provenance gate requires merge_commit_sha, absent in the
+        # 2026-03-10 PR response. Pin the supported contract that provides it.
+        'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'})
     try:
         with build_opener(NoRedirect()).open(request, timeout=30) as response:
             return json.load(response)
