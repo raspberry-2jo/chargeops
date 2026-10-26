@@ -1,7 +1,7 @@
 # ChargeOps 공공 API 수집기 이미지 (데이터팀 Containerfile 과 같은 구성 + S3 업로드용 boto3)
 #   mgmt 에서 만들기:  docker build -t registry.chargeops.lab:5000/chargeops/collector:0.1 -f Containerfile .
 #   실행 예: python collector_v1.py status   (접속 정보 · 인증키는 환경변수 — K8s 의 ConfigMap · Secret)
-FROM docker.io/library/python:3.13-slim
+FROM registry.chargeops.lab:5000/chargeops/python:3.13-slim
 
 # 출력이 바로 보이게(kubectl logs), pip 캐시를 남기지 않게(이미지 크기)
 ENV PYTHONUNBUFFERED=1 \

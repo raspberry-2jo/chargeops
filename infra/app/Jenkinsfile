@@ -9,12 +9,12 @@ pipeline {
   triggers { pollSCM('H/5 * * * *') }
   parameters {
     booleanParam(name: 'BUILD_ALL_IMAGES', defaultValue: false,
-      description: 'Build all nine images. The first build automatically builds all images.')
+      description: 'Build all eight unique images. The first build automatically builds all images.')
   }
   environment {
     REGISTRY = 'registry.chargeops.lab:5000/chargeops'
     APP_ROOT = 'infra/app'
-    PUBLISH_BRANCH = 'dev'
+    PUBLISH_BRANCH = 'kim_chanju'
   }
   stages {
     stage('Checkout') {
@@ -59,17 +59,16 @@ pipeline {
           } : []
           env.APP_CHANGED = (!changedFiles.isEmpty() || params.BUILD_ALL_IMAGES).toString()
           def legacyImages = ['chargeops-chatops-bot', 'chargeops-alert-router', 'chargeops-mock-csms']
-          def appImages = ['chargeops-ai-gateway', 'chargeops-v2-chatops-bot', 'chargeops-v2-csms',
-                           'chargeops-v2-notifier', 'chargeops-v2-vcharger', 'chargeops-v2-collector']
+          def appImages = ['chargeops-ai-gateway', 'chargeops-csms',
+                           'chargeops-notifier', 'chargeops-vcharger', 'chargeops-collector']
           def allImages = legacyImages + appImages
           def selected = new LinkedHashSet()
           def appPaths = [
             'ai_gateway': 'chargeops-ai-gateway',
-            'chatops_bot': 'chargeops-v2-chatops-bot',
-            'csms': 'chargeops-v2-csms',
-            'notifier': 'chargeops-v2-notifier',
-            'vcharger': 'chargeops-v2-vcharger',
-            'collector': 'chargeops-v2-collector'
+            'csms': 'chargeops-csms',
+            'notifier': 'chargeops-notifier',
+            'vcharger': 'chargeops-vcharger',
+            'collector': 'chargeops-collector'
           ]
           def legacyDockerfiles = [
             'docker/chatops-bot.Dockerfile': 'chargeops-chatops-bot',
@@ -90,7 +89,9 @@ pipeline {
               } else if (path.startsWith('docker/')) {
                 selected.addAll(legacyImages)
               } else if (path.startsWith('apps/common/')) {
-                selected.addAll(['chargeops-ai-gateway', 'chargeops-v2-chatops-bot', 'chargeops-v2-notifier'])
+                selected.addAll(['chargeops-ai-gateway', 'chargeops-notifier'])
+              } else if (path.startsWith('apps/chatops_bot/')) {
+                echo 'The existing docker/chatops-bot.Dockerfile takes precedence for chargeops-chatops-bot.'
               } else if (path.startsWith('apps/')) {
                 def matched = appPaths.find { folder, image -> path.startsWith('apps/' + folder + '/') }
                 if (matched) { selected.add(matched.value) }
@@ -143,11 +144,10 @@ pipeline {
             build_if_selected chargeops-alert-router docker/router.Dockerfile .
             build_if_selected chargeops-mock-csms docker/mock-csms.Dockerfile .
             build_if_selected chargeops-ai-gateway apps/ai_gateway/Dockerfile apps
-            build_if_selected chargeops-v2-chatops-bot apps/chatops_bot/Dockerfile apps
-            build_if_selected chargeops-v2-csms apps/csms/Dockerfile apps
-            build_if_selected chargeops-v2-notifier apps/notifier/Dockerfile apps
-            build_if_selected chargeops-v2-vcharger apps/vcharger/Dockerfile apps
-            build_if_selected chargeops-v2-collector apps/collector/Dockerfile apps
+            build_if_selected chargeops-csms apps/csms/Dockerfile apps
+            build_if_selected chargeops-notifier apps/notifier/Dockerfile apps
+            build_if_selected chargeops-vcharger apps/vcharger/Dockerfile apps
+            build_if_selected chargeops-collector apps/collector/Dockerfile apps
             if [ "$PUBLISH_IMAGES" = 'true' ]; then
               for NAME in $BUILD_IMAGES; do
                 docker push "$REGISTRY/$NAME:$IMAGE_TAG"

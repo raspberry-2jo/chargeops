@@ -57,6 +57,12 @@ vault-password*
 __pycache__/
 *.py[cod]
 .venv/
+.ci-venv/
+.gitops-delivery/
+.gitops-delivery@tmp/
+artifacts/
+.pr-notifications/
+.pr-notify-venv/
 venv/
 env/
 *.egg-info/

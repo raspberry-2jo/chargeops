@@ -6,5 +6,5 @@ def cicd_healthz():
     return {
         "status": "ok",
         "service": "ai-gateway",
-        "marker": "ci-cd-probe-v1",
+        "marker": "ci-cd-probe",
     }
