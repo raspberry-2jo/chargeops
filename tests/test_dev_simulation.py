@@ -51,6 +51,7 @@ def app_handlers():
               call_result=SimpleNamespace(**{name: lambda **kw: kw for name in
                   ['BootNotification', 'Heartbeat', 'StatusNotification', 'MeterValues']}),
               db=AsyncMock(side_effect=AssertionError('unexpected DB access')), state={}, connected={},
+              connection_metrics=MagicMock(), draining=False,
               OCPP_CODE={'Available': '2'}, REQUIRE_CN=False, HEARTBEAT=30, POD='dev-pod', POD_IP='127.0.0.1',
               time=time, uuid=uuid, log=logging.getLogger('test'), now=lambda: datetime.now(timezone.utc))
     for name in ['c_msg', 'h_ocpp', 'g_hb', 'g_cur', 'g_temp', 'g_volt', 'g_energy', 'g_faulted', 'g_charging',

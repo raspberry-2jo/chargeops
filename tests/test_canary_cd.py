@@ -40,7 +40,10 @@ def test_sync_is_bound_to_revision_and_only_csms(monkeypatch):
     assert operation['initiatedBy']['username'] == marker
     assert operation['info'] == [{'name': 'chargeops-operation-id', 'value': marker}]
     assert operation['sync'] == {'revision': 'c' * 40, 'prune': False,
-                                 'resources': [{'group': 'apps', 'kind': 'Deployment', 'name': 'csms'}]}
+                                 'resources': canary.SYNC_RESOURCES}
+    workloads=[r for r in canary.SYNC_RESOURCES if r['kind'] in ('Deployment','Rollout','StatefulSet','CronJob')]
+    assert workloads == [{'group':'apps','kind':'Deployment','name':'csms'}]
+    assert any(r['kind']=='ConfigMap' and r['name']=='csms-ops-service-gate-settings' for r in canary.SYNC_RESOURCES)
 
 
 @pytest.mark.parametrize('drift', [False, True])

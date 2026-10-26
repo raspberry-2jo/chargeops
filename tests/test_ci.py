@@ -119,10 +119,9 @@ def test_wrong_branch_and_pr_cannot_publish(bash, tmp_path, branch, change_id):
     assert "configured non-PR branch" in result.stderr
 
 
-def test_dev_branch_can_publish_its_merged_build(bash, tmp_path):
+def test_separate_dev_job_cannot_publish_in_single_job_flow(bash, tmp_path):
     result, calls = build_with_stub(bash, tmp_path, [IMAGES[0].name], branch='dev')
-    assert result.returncode == 0, result.stderr
-    assert any(call[0] == 'push' for call in calls)
+    assert result.returncode != 0 and calls == []
 
 
 @pytest.mark.parametrize("name", ["typo", "chargeops-alert-router", "chargeops-mock-csms"])

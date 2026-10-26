@@ -127,6 +127,35 @@ def test_promotion_uses_verified_digest_without_registry_lookup(repo, tmp_path, 
     assert cd.run('git', 'diff', '--name-only', 'HEAD~1', 'HEAD', cwd=repo) == cd.PROD + '/kustomization.yaml'
 
 
+def test_ops_promotion_commits_only_image_and_baseline_with_real_git(repo,tmp_path,monkeypatch):
+    directory=repo/cd.PROD
+    settings=directory/'gate-settings.yaml'
+    settings.write_text(yaml.safe_dump({'apiVersion':'v1','kind':'ConfigMap',
+        'metadata':{'name':'csms-ops-service-gate-settings'},
+        'data':{'GATE_ENABLED':'true','GATE_BASELINE_AT':'0','GATE_THROUGHPUT_DROP_PERCENT':'50'}}))
+    config=yaml.safe_load((directory/'kustomization.yaml').read_text())
+    config['resources'].append('gate-settings.yaml')
+    (directory/'kustomization.yaml').write_text(yaml.safe_dump(config))
+    cd.run('git','add','.',cwd=repo)
+    cd.run('git','-c','core.hooksPath=/dev/null','commit','-m','Ops gate policy',cwd=repo)
+    cd.run('git','push','origin','main',cwd=repo)
+    candidate=prepared(repo,tmp_path,monkeypatch,canary=True)
+    dev_before=cd.rendered(repo,cd.DEV)
+    receipt=tmp_path/'receipt.json'
+    cd.save(receipt,receipt_for(candidate))
+    monkeypatch.setattr(cd,'live_candidate',lambda image:image==B)
+    monkeypatch.setattr(cd,'kubectl',lambda *a:{'metadata':{'uid':'test-job-uid'},'status':{'succeeded':1}})
+    cd.promote(repo,candidate,receipt,tmp_path/'delivery.json',canary=True)
+    data=yaml.safe_load(settings.read_text())['data']
+    assert data['GATE_ENABLED']=='true' and data['GATE_THROUGHPUT_DROP_PERCENT']=='50'
+    assert int(data['GATE_BASELINE_AT'])>0
+    assert cd.rendered(repo,cd.DEV)==dev_before
+    assert cd.csms_image(repo,cd.PROD)==B
+    assert set(cd.run('git','diff','--name-only','HEAD~1','HEAD',cwd=repo).splitlines())=={
+        cd.PROD+'/gate-settings.yaml',cd.PROD+'/kustomization.yaml'}
+    assert not cd.run('git','status','--porcelain',cwd=repo)
+
+
 @pytest.mark.parametrize('failure', ['missing_receipt', 'wrong_receipt', 'expired', 'future', 'dev_drift', 'job_replaced', 'prod_changed'])
 def test_failed_or_stale_verification_never_updates_production(repo, tmp_path, monkeypatch, failure):
     candidate = prepared(repo, tmp_path, monkeypatch)
@@ -158,13 +187,14 @@ def test_verification_job_is_confined_to_dev_and_has_no_literal_credentials():
     assert job['spec']['backoffLimit'] == 0
 
 
-def test_reviewed_merge_gate_replaces_jenkins_input_and_precedes_production_update():
+def test_single_job_waits_for_reviewed_merge_after_verification_before_production():
     pipeline = (ROOT / 'Jenkinsfile').read_text(encoding='utf-8')
-    assert pipeline.index('scripts/github_cd.py validate-merge') < pipeline.index('scripts/env_cd.py verify') < pipeline.index('scripts/env_cd.py promote --require-approved-pr')
+    assert pipeline.index('scripts/env_cd.py verify') < pipeline.index('scripts/github_cd.py open-pr') < pipeline.index('scripts/github_cd.py wait-merge') < pipeline.index('scripts/env_cd.py promote --require-approved-pr')
     assert "stage('Production approval')" not in pipeline
-    assert "env.CHECKOUT_BRANCH == env.PRODUCTION_BRANCH" in pipeline
+    assert '([env.PUBLISH_BRANCH, env.PRODUCTION_BRANCH].contains' not in pipeline
     assert "name: 'ENABLE_ENVIRONMENT_CD', defaultValue: true" in pipeline
     assert "name: 'ENABLE_CANARY', defaultValue: true" in pipeline
+    assert "error('PR-based Ops delivery requires ENABLE_CANARY=true')" in pipeline
 
 
 def test_unpinned_or_foreign_images_cannot_be_promoted(tmp_path):

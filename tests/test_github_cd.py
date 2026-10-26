@@ -46,6 +46,111 @@ def test_reviewed_current_dev_merge_is_accepted(monkeypatch):
     assert github.approved_merge(SOURCE)['approvers'] == ['reviewer']
 
 
+def test_pr_api_contract_retains_merge_commit_provenance(monkeypatch):
+    # Reproduce the live schema difference without credentials or network calls.
+    class Response:
+        def __init__(self, payload): self.payload = payload
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self): return json.dumps(self.payload).encode()
+    class Opener:
+        def open(self, request, **kwargs):
+            document = pull()
+            if request.get_header('X-github-api-version') != '2022-11-28':
+                document.pop('merge_commit_sha')
+            return Response(document)
+    monkeypatch.setenv('GITHUB_PR_TOKEN','test-token')
+    monkeypatch.setattr(github,'build_opener',lambda *args:Opener())
+    assert github.api('GET','/repos/'+github.REPOSITORY+'/pulls/12')['merge_commit_sha'] == SOURCE
+
+
+def preview_receipts(tmp_path):
+    candidate = {'schema':1,'source':HEAD,'image':B,'verification_mode':'read-only'}
+    path = tmp_path/'pr.json'
+    cd.save(path,{'number':12,'source':HEAD,'image':B})
+    return candidate,path
+
+
+@pytest.mark.parametrize('same_apps',[True,False])
+def test_single_build_binds_reviewed_merge_to_exact_verified_apps_tree(tmp_path,monkeypatch,same_apps):
+    fixture_api(monkeypatch)
+    original = github.api
+    def api(method,path,data=None):
+        if '/git/trees/' in path:
+            value = 'tree-a' if same_apps or path.endswith(HEAD) else 'tree-b'
+            return {'tree':[{'path':'apps','type':'tree','sha':value}]}
+        return original(method,path,data)
+    monkeypatch.setattr(github,'api',api)
+    candidate,path = preview_receipts(tmp_path)
+    if same_apps:
+        approval = github.approved_candidate(candidate,path)
+        assert approval['source'] == SOURCE and approval['candidate_source'] == HEAD
+        assert approval['image'] == B
+    else:
+        with pytest.raises(cd.DeliveryPreflightError,match='build context'):
+            github.approved_candidate(candidate,path)
+
+
+@pytest.mark.parametrize('state',['open','closed','head_changed'])
+def test_single_build_does_not_promote_approval_without_merge_or_changed_head(tmp_path,monkeypatch,state):
+    from types import SimpleNamespace
+    now=[0]
+    monkeypatch.setattr(github,'time',SimpleNamespace(time=lambda:1000,monotonic=lambda:now[0],
+        sleep=lambda seconds:now.__setitem__(0,now[0]+seconds)))
+    candidate,pr_path=preview_receipts(tmp_path)
+    candidate_path,receipt_path=tmp_path/'candidate.json',tmp_path/'verification.json'
+    cd.save(candidate_path,candidate)
+    cd.save(receipt_path,{'candidate':cd.fingerprint(candidate),'image':B,'verified_at':1000})
+    monkeypatch.setenv('CHECKOUT_BRANCH','kim_chanju')
+    monkeypatch.delenv('CHANGE_ID',raising=False)
+    response={'state':'closed' if state=='closed' else 'open','merged':False,
+              'head':{'sha':'b'*40 if state=='head_changed' else HEAD}}
+    monkeypatch.setattr(github,'api',lambda *a,**k:response)
+    with pytest.raises(cd.DeliveryPreflightError):
+        github.wait_for_merge(candidate_path,receipt_path,pr_path,tmp_path/'approval.json',timeout=2,interval=1)
+    assert not (tmp_path/'approval.json').exists()
+
+
+def test_single_preview_promotes_same_dev_digest_after_live_pr_revalidation(repo,tmp_path,monkeypatch):
+    candidate_path=prepared(repo,tmp_path,monkeypatch,canary=True)
+    candidate=cd.load(candidate_path)
+    receipt=tmp_path/'receipt.json'
+    cd.save(receipt,receipt_for(candidate_path))
+    monkeypatch.setenv('CHECKOUT_BRANCH','kim_chanju')
+    monkeypatch.delenv('CHANGE_ID',raising=False)
+    monkeypatch.setattr(cd,'live_candidate',lambda image:image==B)
+    monkeypatch.setattr(cd,'kubectl',lambda *a:{'metadata':{'uid':'test-job-uid'},'status':{'succeeded':1}})
+    revalidated=[]
+    def approval(value):
+        revalidated.append(value)
+        return {'number':12,'head':value['source'],'source':SOURCE,'image':value['image'],'approvers':['reviewer']}
+    monkeypatch.setattr(github,'approved_candidate',approval)
+    delivery=tmp_path/'delivery.json'
+    cd.promote(repo,candidate_path,receipt,delivery,canary=True,require_approved_pr=True)
+    assert revalidated == [candidate]
+    assert cd.csms_image(repo,cd.DEV) == cd.csms_image(repo,cd.PROD) == B
+    assert cd.load(delivery)['source_approval']['image'] == B
+
+
+def test_wait_resumes_only_after_merged_candidate_is_revalidated(tmp_path,monkeypatch):
+    candidate,pr_path=preview_receipts(tmp_path)
+    candidate_path,receipt_path=tmp_path/'candidate.json',tmp_path/'verification.json'
+    cd.save(candidate_path,candidate)
+    cd.save(receipt_path,{'candidate':cd.fingerprint(candidate),'image':B,'verified_at':int(github.time.time())})
+    monkeypatch.setenv('CHECKOUT_BRANCH','kim_chanju')
+    monkeypatch.delenv('CHANGE_ID',raising=False)
+    monkeypatch.setattr(github,'api',lambda *a,**k:{'merged':True,'head':{'sha':HEAD}})
+    approval={'number':12,'image':B,'approvers':['reviewer']}
+    calls=[]
+    def revalidate(value,path):
+        calls.append((value,path))
+        return approval
+    monkeypatch.setattr(github,'approved_candidate',revalidate)
+    output=tmp_path/'approval.json'
+    assert github.wait_for_merge(candidate_path,receipt_path,pr_path,output)==approval
+    assert calls==[(candidate,pr_path)] and cd.load(output)==approval
+
+
 def test_read_only_outsider_approval_does_not_authorize_ops(monkeypatch):
     fixture_api(monkeypatch)
     original = github.api
@@ -103,12 +208,12 @@ def test_verified_preview_opens_or_reuses_one_pr_without_merging(repo, tmp_path,
     assert cd.csms_image(repo, cd.PROD) == A
 
 
-def test_preview_never_promotes_even_with_valid_dev_receipt(repo, tmp_path, monkeypatch):
+def test_preview_cannot_promote_without_reviewed_source_pr(repo, tmp_path, monkeypatch):
     candidate = prepared(repo, tmp_path, monkeypatch)
     receipt = tmp_path / 'receipt.json'
     cd.save(receipt, receipt_for(candidate))
     monkeypatch.setenv('CHECKOUT_BRANCH', 'kim_chanju')
-    with pytest.raises(cd.DeliveryPreflightError, match='reviewed dev merge'):
+    with pytest.raises(cd.DeliveryPreflightError, match='reviewed'):
         cd.promote(repo, candidate, receipt, tmp_path / 'delivery.json', canary=True, require_approved_pr=True)
     assert cd.csms_image(repo, cd.PROD) == A
 

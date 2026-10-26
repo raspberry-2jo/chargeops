@@ -172,17 +172,37 @@ def git_environment(repo):
     return env
 
 
-def commit(repo, overlay, message):
-    allowed = overlay + '/kustomization.yaml'
-    changed = run('git', 'diff', '--name-only', cwd=repo).splitlines()
-    if set(changed) - {allowed}:
+def commit(repo, overlay, message, allow_gate_baseline=False):
+    allowed = {overlay + '/kustomization.yaml'}
+    changed = run('git', 'diff', 'HEAD', '--name-only', cwd=repo).splitlines()
+    gate_file = overlay + '/gate-settings.yaml'
+    if allow_gate_baseline and overlay in (CANARY_DEV, PROD) and gate_file in changed:
+        before = yaml.safe_load(run('git', 'show', 'HEAD:' + gate_file, cwd=repo))
+        after = yaml.safe_load((Path(repo) / gate_file).read_text(encoding='utf-8'))
+        try:
+            before['data'].pop('GATE_BASELINE_AT')
+            timestamp = after['data'].pop('GATE_BASELINE_AT')
+        except (KeyError, TypeError, AttributeError):
+            raise DeliveryPreflightError('Gate baseline settings are malformed') from None
+        if not re.fullmatch(r'[0-9]{10}', str(timestamp)) or before != after:
+            raise DeliveryPreflightError('Delivery may update only the gate baseline timestamp, not gate policy')
+        allowed.add(gate_file)
+    if set(changed) - allowed:
         raise DeliveryPreflightError('Delivery may change only its environment image file')
     if changed:
-        run('git', 'add', '--', allowed, cwd=repo)
+        run('git', 'add', '--', *sorted(set(changed)), cwd=repo)
         run('git', '-c', 'user.name=ChargeOps CI', '-c', 'user.email=chargeops-ci@example.invalid',
             'commit', '-m', message, cwd=repo)
         run('git', 'push', 'origin', 'HEAD:main', cwd=repo, env=git_environment(repo))
     return run('git', 'rev-parse', 'HEAD', cwd=repo)
+
+
+def stamp_gate_baseline(repo, overlay):
+    path = Path(repo) / overlay / 'gate-settings.yaml'
+    if path.exists():
+        settings = yaml.safe_load(path.read_text(encoding='utf-8'))
+        settings['data']['GATE_BASELINE_AT'] = str(int(time.time()))
+        path.write_text(yaml.safe_dump(settings, sort_keys=False), encoding='utf-8')
 
 
 def candidate_check(candidate):
@@ -234,11 +254,16 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False):
         candidate.update(development_mode='canary', previous_development_image=previous)
     if canary:
         candidate['canary_fingerprint'] = fingerprint(rendered(repo, CANARY))
+    # A fixed pre-delivery timestamp is reused by all Canary analysis steps.
+    # Keep the operator's enable flag; never fabricate a baseline during analysis.
+    if DEV == CANARY_DEV:
+        stamp_gate_baseline(repo, DEV)
     pin_image(repo, DEV, candidate['image'])
     if production_fingerprint(repo) != before:
         raise DeliveryPreflightError('Development update changed production')
     candidate['development_fingerprint'] = fingerprint(rendered(repo, DEV))
-    candidate['development_revision'] = commit(repo, DEV, f'build(dev): verify CSMS {tag}')
+    candidate['development_revision'] = commit(repo, DEV, f'build(dev): verify CSMS {tag}',
+                                              allow_gate_baseline=True)
     save(output, candidate)
     print('Development digest committed; production unchanged')
 
@@ -452,10 +477,15 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
     validate_receipt(candidate, receipt, int(time.time()))
     approval = None
     if require_approved_pr:
-        if os.environ.get('CHECKOUT_BRANCH') != 'dev' or os.environ.get('CHANGE_ID'):
+        branch = os.environ.get('CHECKOUT_BRANCH')
+        if branch not in ('kim_chanju', 'dev') or os.environ.get('CHANGE_ID'):
             raise DeliveryPreflightError('Only a reviewed dev merge may promote production')
-        from github_cd import approved_merge
-        approval = approved_merge(candidate['source'])
+        if branch == 'kim_chanju':
+            from github_cd import approved_candidate
+            approval = approved_candidate(candidate)
+        else:
+            from github_cd import approved_merge
+            approval = approved_merge(candidate['source'])
     ensure_clean(repo)
     if production_fingerprint(repo) != candidate['production_fingerprint']:
         raise DeliveryPreflightError('Production changed while approval was pending')
@@ -473,10 +503,13 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
         delivery['source_approval'] = approval
     save(delivery_path, delivery)
     dev_before = rendered(repo, DEV)
+    if canary:
+        stamp_gate_baseline(repo, PROD)
     pin_image(repo, PROD, candidate['image'])
     if rendered(repo, DEV) != dev_before:
         raise DeliveryPreflightError('Production promotion changed development')
-    revision = commit(repo, PROD, f'promote(ops): verified CSMS {candidate["source"][:12]}')
+    revision = commit(repo, PROD, f'promote(ops): verified CSMS {candidate["source"][:12]}',
+                      allow_gate_baseline=canary)
     delivery.update(revision=revision, phase='pending', production_fingerprint=production_fingerprint(repo))
     if canary:
         delivery['canary_fingerprint'] = fingerprint(rendered(repo, CANARY))
