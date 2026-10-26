@@ -70,6 +70,8 @@ g_charging = Gauge("chargeops_charger_charging", "1=충전 중", L)
 g_hb = Gauge("chargeops_charger_last_heartbeat_timestamp_seconds", "마지막 Heartbeat 시각", L)
 g_temp = Gauge("chargeops_charger_temp_celsius", "온도", L)
 g_cur = Gauge("chargeops_charger_current_amperes", "전류", L)
+g_volt = Gauge("chargeops_charger_voltage_volts", "충전기 전압", L)
+g_energy = Gauge("chargeops_charger_energy_wh", "충전기 누적 수전 에너지 (Wh)", L)
 g_rated = Gauge("chargeops_charger_rated_current_amperes", "정격 전류", L)
 c_fault = Counter("chargeops_charger_fault_total", "Faulted 진입 횟수", L)
 c_reset = Counter("chargeops_reset_total", "리셋 요청 결과", ["type", "result"])
@@ -155,6 +157,10 @@ class ChargePoint(OcppChargePoint):
                 g_cur.labels(**self.labels()).set(cur)
             if temp is not None:
                 g_temp.labels(**self.labels()).set(temp)
+            if volt is not None:
+                g_volt.labels(**self.labels()).set(volt)
+            if energy is not None:
+                g_energy.labels(**self.labels()).set(energy)
             if not is_simulated(self.id):
                 await db("""INSERT INTO meter_sample (charger_id, ts, current_a, voltage_v, temp_c, energy_wh)
                             VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING""",
@@ -248,7 +254,7 @@ async def on_connect(ws):
         else:
             log.info("disconnect %s: 새 세션이 있어 통신이상 기록 생략", cid)
         if cid.startswith("LT-"):              # 부하 시험 종료 시 1,000대 C-02 경보 폭주 방지: 지표 제거
-            for g in (g_connected, g_faulted, g_charging, g_hb, g_temp, g_cur, g_rated, c_fault):
+            for g in (g_connected, g_faulted, g_charging, g_hb, g_temp, g_cur, g_volt, g_energy, g_rated, c_fault):
                 try:
                     g.remove(*lab.values())
                 except KeyError:
