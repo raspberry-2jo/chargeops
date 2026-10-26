@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import yaml
 
 import pytest
 
@@ -42,12 +43,20 @@ def test_sync_is_bound_to_revision_and_only_csms(monkeypatch):
     assert operation['sync'] == {'revision': 'c' * 40, 'prune': False,
                                  'resources': canary.SYNC_RESOURCES}
     workloads=[r for r in canary.SYNC_RESOURCES if r['kind'] in ('Deployment','Rollout','StatefulSet','CronJob')]
-    assert workloads == [{'group':'apps','kind':'Deployment','name':'csms'}]
+    assert workloads == [{'group':'apps','kind':'Deployment','name':'csms'},
+                         {'group':'argoproj.io','kind':'Rollout','name':'csms'}]
     assert any(r['kind']=='ConfigMap' and r['name']=='csms-ops-service-gate-settings' for r in canary.SYNC_RESOURCES)
 
 
 @pytest.mark.parametrize('drift', [False, True])
 def test_preflight_checks_preserved_live_runtime(repo, tmp_path, monkeypatch, drift):
+    config=repo/cd.CANARY/'fixture.yaml'
+    config.write_text(yaml.safe_dump({'apiVersion':'v1','kind':'ConfigMap','metadata':{'name':'csms-ops-ocpp-settings'},
+        'data':{'OCPP_TEST_CHARGER_ID':'CI-OPS-CANARY-001','OCPP_FIXTURE_RESERVED':'true'}}))
+    path=repo/cd.CANARY/'kustomization.yaml'
+    document=yaml.safe_load(path.read_text());document['resources'].append('fixture.yaml');path.write_text(yaml.safe_dump(document))
+    cd.run('git','add','.',cwd=repo);cd.run('git','-c','core.hooksPath=/dev/null','commit','-m','Ops fixture settings',cwd=repo)
+    cd.run('git','push','origin','main',cwd=repo)
     candidate = prepared(repo, tmp_path, monkeypatch, canary=True)
     desired = next(d for d in cd.rendered(repo, cd.PROD) if d['kind'] == 'Deployment')
     actual = copy.deepcopy(desired)
@@ -61,6 +70,15 @@ def test_preflight_checks_preserved_live_runtime(repo, tmp_path, monkeypatch, dr
             canary.preflight(repo, candidate)
     else:
         canary.preflight(repo, candidate)
+
+
+@pytest.mark.parametrize('settings',[None,{}, {'OCPP_TEST_CHARGER_ID':'CH-01','OCPP_FIXTURE_RESERVED':'true'},
+    {'OCPP_TEST_CHARGER_ID':'CI-OPS-CANARY-001','OCPP_FIXTURE_RESERVED':'false'}])
+def test_missing_or_unreserved_ops_fixture_blocks_before_cluster_or_git_mutation(monkeypatch,settings):
+    docs=[] if settings is None else [{'kind':'ConfigMap','metadata':{'name':'csms-ops-ocpp-settings'},'data':settings}]
+    monkeypatch.setattr(cd,'rendered',lambda *args:docs)
+    monkeypatch.setattr(cd,'load',lambda *args:pytest.fail('Fixture must block before candidate/cluster mutation'))
+    with pytest.raises(cd.DeliveryPreflightError,match='Ops OCPP fixture'):canary.preflight('repo','candidate')
 
 
 def test_changed_canary_policy_cannot_be_approved(repo, tmp_path, monkeypatch):
