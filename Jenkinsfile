@@ -322,6 +322,7 @@ pipeline {
       }
       steps {
         script {
+          if (!params.ENABLE_CANARY) { error('PR-based Ops delivery requires ENABLE_CANARY=true') }
           if (params.ENABLE_CANARY) {
             withCredentials([file(credentialsId: params.CANARY_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG'),
               usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {

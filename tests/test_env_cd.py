@@ -194,6 +194,7 @@ def test_single_job_waits_for_reviewed_merge_after_verification_before_productio
     assert '([env.PUBLISH_BRANCH, env.PRODUCTION_BRANCH].contains' not in pipeline
     assert "name: 'ENABLE_ENVIRONMENT_CD', defaultValue: true" in pipeline
     assert "name: 'ENABLE_CANARY', defaultValue: true" in pipeline
+    assert "error('PR-based Ops delivery requires ENABLE_CANARY=true')" in pipeline
 
 
 def test_unpinned_or_foreign_images_cannot_be_promoted(tmp_path):
