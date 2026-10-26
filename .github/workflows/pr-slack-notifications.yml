@@ -1,0 +1,148 @@
+name: PR Slack notifications
+run-name: PR Slack notification (${{ github.event_name }}, ${{ github.event.pull_request.number || 'connection test' }})
+
+on:
+  pull_request_target:
+    branches: [dev]
+    types: [closed]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+
+# This workflow only posts to Slack; it does not call the GitHub API or checkout code.
+permissions: {}
+
+concurrency:
+  group: pr-slack-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}-${{ github.event.review.id || github.event.action || 'manual' }}
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    if: >-
+      github.repository == 'raspberry-2jo/chargeops' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.pull_request.base.ref == 'dev' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (github.event_name == 'pull_request_target' ||
+         (github.event_name == 'pull_request_review' &&
+          (github.event.review.state == 'approved' || github.event.review.state == 'changes_requested')))))
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Send PR decision to Slack
+        shell: bash
+        env:
+          SLACK_CICD_TOKEN: ${{ secrets.SLACK_CICD_TOKEN }}
+          SLACK_CICD_CHANNEL: ${{ vars.SLACK_CICD_CHANNEL }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          import time
+          from urllib.error import HTTPError, URLError
+          from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+          REPOSITORY = 'raspberry-2jo/chargeops'
+
+          class NotificationError(RuntimeError):
+              pass
+
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+
+          def actor(user):
+              value = (user or {}).get('login', '')
+              return value if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9\[\]-]{0,99}', value) else '(unknown)'
+
+          def message(event_name, event):
+              if event.get('repository', {}).get('full_name') != REPOSITORY:
+                  return None
+              if event_name == 'workflow_dispatch':
+                  return '[ChargeOps] GitHub Actions Slack 연결 테스트\nPR 승인·종료 알림 연결을 확인합니다. 배포는 실행하지 않습니다.'
+              pr = event.get('pull_request') or {}
+              if (pr.get('base', {}).get('ref') != 'dev'
+                      or pr.get('base', {}).get('repo', {}).get('full_name') != REPOSITORY
+                      or pr.get('head', {}).get('repo', {}).get('full_name') != REPOSITORY):
+                  return None
+              number = pr.get('number')
+              if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+                  raise NotificationError('Invalid PR number in GitHub event')
+              lines = []
+              if event_name == 'pull_request_review' and event.get('action') == 'submitted':
+                  review = event.get('review') or {}
+                  state = str(review.get('state', '')).lower()
+                  if state not in ['approved', 'changes_requested']:
+                      return None
+                  lines = ['[ChargeOps] ' + ('PR 리뷰 승인' if state == 'approved' else 'PR 수정 요청'),
+                           '리뷰어: ' + actor(review.get('user'))]
+                  if review.get('commit_id') != pr.get('head', {}).get('sha'):
+                      lines.append('이전 커밋에 대한 리뷰이며 현재 변경의 승인으로 간주하지 않습니다.')
+                  lines.append('리뷰 이벤트 알림입니다. Ops 배포는 Merge 후 기존 Jenkins 검증을 통과해야 진행됩니다.')
+              elif event_name == 'pull_request_target' and event.get('action') == 'closed':
+                  if pr.get('merged') is True:
+                      lines = ['[ChargeOps] PR Merge 완료', '처리자: ' + actor(event.get('sender')),
+                               'dev에 Merge됐습니다. CI·Dev 검증·Ops 배포 결과는 기존 Jenkins 알림에서 확인하세요.']
+                  else:
+                      lines = ['[ChargeOps] PR 거부·종료 (Merge 없이 닫힘)', '처리자: ' + actor(event.get('sender')),
+                               '이 PR 종료로 Ops 승격이나 Dev 자동 롤백을 실행하지 않습니다.']
+              else:
+                  return None
+              lines.extend(['PR #' + str(number) + ' → dev', 'https://github.com/' + REPOSITORY + '/pull/' + str(number)])
+              # Titles, review bodies and untrusted URLs never become shell commands or messages.
+              return '\n'.join(lines)
+
+          def send(text, token, channel, opener=None, sleep=time.sleep):
+              if not token:
+                  raise NotificationError('Repository Secret SLACK_CICD_TOKEN is missing')
+              if token.startswith('xapp-'):
+                  raise NotificationError('Use the Slack Bot OAuth token, not an App-Level token')
+              if not re.fullmatch(r'[CG][A-Z0-9]+', channel):
+                  raise NotificationError('Repository Variable SLACK_CICD_CHANNEL is missing or invalid')
+              payload = json.dumps({'channel': channel, 'text': text, 'mrkdwn': False,
+                                    'unfurl_links': False, 'unfurl_media': False}).encode()
+              request = Request('https://slack.com/api/chat.postMessage', method='POST', data=payload,
+                                headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json; charset=utf-8'})
+              transport = opener or build_opener(NoRedirect())
+              for attempt in range(3):
+                  try:
+                      with transport.open(request, timeout=15) as response:
+                          result = json.load(response)
+                      if result.get('ok') is not True:
+                          code = result.get('error')
+                          safe = code if code in ['invalid_auth', 'token_revoked', 'missing_scope', 'not_in_channel', 'channel_not_found'] else 'API rejected request'
+                          raise NotificationError('Slack notification failed: ' + safe)
+                      print('Slack PR notification sent')
+                      return
+                  except HTTPError as error:
+                      if error.code in [429, 500, 502, 503, 504] and attempt < 2:
+                          sleep(2 ** (attempt + 1))
+                          continue
+                      raise NotificationError('Slack HTTP ' + str(error.code) + '; response body withheld') from None
+                  except URLError:
+                      if attempt < 2:
+                          sleep(2 ** (attempt + 1))
+                          continue
+                      raise NotificationError('Slack connection failed; check Actions runner connectivity') from None
+
+          def main():
+              with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as handle:
+                  event = json.load(handle)
+              text = message(os.environ['GITHUB_EVENT_NAME'], event)
+              if text is None:
+                  print('Skipped: event is outside the configured PR decision scope')
+                  return
+              send(text, os.environ.get('SLACK_CICD_TOKEN', ''), os.environ.get('SLACK_CICD_CHANNEL', ''))
+
+          if __name__ == '__main__':
+              try:
+                  main()
+              except NotificationError as error:
+                  print('::error::' + str(error))
+                  sys.exit(1)
+              except Exception:
+                  print('::error::PR Slack notification failed; no credential, event body or API response printed')
+                  sys.exit(1)
+          PY

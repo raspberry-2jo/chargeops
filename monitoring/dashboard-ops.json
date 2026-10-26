@@ -1,0 +1,2614 @@
+{
+  "uid": "chargeops-ops",
+  "title": "ChargeOps 관제 (통합)",
+  "description": "2026-10-14 시안 D2 — 관제 · 우리 vs 제주 · 운영 감사를 한 화면에. 색 규칙: 빨강 고장·긴급 / 노랑 주의·통신 이상 / 파랑 충전·승인 대기 / 초록 정상·해소 / 회색 모름 / 청록 우리",
+  "tags": [
+    "chargeops",
+    "ops"
+  ],
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "templating": {
+    "list": [
+      {
+        "name": "charger",
+        "label": "충전기",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values(chargeops_charger_connected{charger_id=~\"CH-.*\"}, charger_id)",
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "끊김 · 고장 충전기",
+      "description": "연결이 끊겼거나 고장(Faulted)인 실물 충전기 수. 어느 충전기인지는 아래 카드에서 확인",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 5,
+        "h": 3
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count((max by (charger_id) (chargeops_charger_connected{charger_id=~\"CH-.*\"}) == 0) or (max by (charger_id) (chargeops_charger_faulted{charger_id=~\"CH-.*\"}) == 1)) or vector(0)",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "모두 정상",
+                  "color": "#3FB950"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3FB950",
+                "value": null
+              },
+              {
+                "color": "#F85149",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "공공 API 수집 · 마지막 성공",
+      "description": "5분마다 도는 제주 상태 수집이 마지막으로 성공한 지 몇 분. 11분 넘으면 노랑(2회 연속 실패), 30분 넘으면 빨강",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "gridPos": {
+        "x": 5,
+        "y": 0,
+        "w": 5,
+        "h": 3
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT round(extract(epoch FROM now() - max(started_at)) / 60)::int AS v FROM collect_log WHERE operation = 'getChargerStatus' AND status = 'ok'"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "suffix:분 전",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3FB950",
+                "value": null
+              },
+              {
+                "color": "#D29922",
+                "value": 11
+              },
+              {
+                "color": "#F85149",
+                "value": 30
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "DB 복제 지연",
+      "description": "Standby(db-02)가 Primary 보다 몇 초 늦은지. 5초 노랑 · 30초 빨강",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 0,
+        "w": 5,
+        "h": 3
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(pg_replication_lag_seconds and on(instance) pg_replication_is_replica == 1)",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1,
+          "noValue": "Standby 없음",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3FB950",
+                "value": null
+              },
+              {
+                "color": "#D29922",
+                "value": 5
+              },
+              {
+                "color": "#F85149",
+                "value": 30
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "알림 전송 실패 · 1시간",
+      "description": "Slack · 메일 전송 실패 수. 0 이 아니면 알림이 사람에게 닿지 않았을 수 있음 — 감사 줄의 '알림 전송 실패' 표",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "gridPos": {
+        "x": 15,
+        "y": 0,
+        "w": 5,
+        "h": 3
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT count(*) AS v FROM v_ops_notify WHERE sent_at > now() - interval '1 hour' AND channel IN ('slack', 'mail') AND status <> 'ok'"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "정상",
+                  "color": "#3FB950"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3FB950",
+                "value": null
+              },
+              {
+                "color": "#F85149",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "백업 · WAL 보관",
+      "description": "Primary 의 WAL 이 S3 로 마지막 보관된 지 몇 초 (평소 60초 안). 5분 노랑 · 15분 빨강",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 3
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(pg_stat_archiver_last_archive_age and on(instance) pg_replication_is_replica == 0)",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3FB950",
+                "value": null
+              },
+              {
+                "color": "#D29922",
+                "value": 300
+              },
+              {
+                "color": "#F85149",
+                "value": 900
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "조치 필요 — 급한 순 · '무슨 일'을 누르면 Slack 스레드",
+      "description": "열린 장애(긴급 · 높음 · 주의)와 대기 중인 승인 요청. 담당 = Slack 에서 처음 버튼을 누른 사람",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT level AS \"등급\", target AS \"대상\", title AS \"무슨 일\", detail AS \"상황\", owner AS \"담당\",\n  CASE WHEN age_sec < 3600 THEN to_char(make_interval(secs => age_sec), 'MI:SS') ELSE to_char(make_interval(secs => age_sec), 'HH24:MI:SS') END AS \"경과\",\n  slack_permalink AS link\nFROM v_ops_todo ORDER BY prio, detected_at"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "md",
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "지금 조치할 일 없음",
+          "custom": {
+            "align": "left",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "등급"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "긴급": {
+                        "color": "#F85149"
+                      },
+                      "높음": {
+                        "color": "#D29922"
+                      },
+                      "주의": {
+                        "color": "#D29922"
+                      },
+                      "승인 대기": {
+                        "color": "#58A6FF"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "대상"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "무슨 일"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Slack 스레드 열기",
+                    "url": "${__data.fields.link}",
+                    "targetBlank": true
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "담당"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "담당 없음": {
+                        "color": "#F85149"
+                      },
+                      "승인자 필요": {
+                        "color": "#58A6FF"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#C9CED6"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "경과"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              },
+              {
+                "id": "custom.align",
+                "value": "right"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "link"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "$charger",
+      "description": "상태 · 전압(노랑) · 전류(주황) · 온도(빨강 글자, 55 ℃ 주의 · 60 ℃ 경고) · 이상 점수(0.6 주의 · 0.8 경고) · 오늘 가동률. 전압 · 전류는 최근 10분 안 최신 측정값",
+      "repeat": "charger",
+      "repeatDirection": "h",
+      "maxPerRow": 3,
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 8,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT c.state AS \"상태\", m.voltage_v AS \"전압\", m.current_a * 1000 AS \"전류\", c.temp_c::float AS \"온도\", c.anomaly::float AS \"이상 점수\", c.uptime_today::float AS \"오늘 가동\" FROM v_charger_card c LEFT JOIN LATERAL (SELECT s.voltage_v, s.current_a FROM meter_sample s WHERE s.charger_id = c.charger_id AND s.ts > now() - interval '10 minutes' ORDER BY s.ts DESC LIMIT 1) m ON true WHERE c.charger_id = '$charger'"
+        }
+      ],
+      "options": {
+        "graphMode": "none",
+        "colorMode": "value",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "orientation": "vertical",
+        "wideLayout": true,
+        "showPercentChange": false,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false,
+          "fields": "/.*/"
+        },
+        "text": {
+          "titleSize": 11,
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "-",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#C9CED6",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "상태"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": "^고장.*",
+                      "result": {
+                        "color": "#F85149"
+                      }
+                    }
+                  },
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": "^통신.*",
+                      "result": {
+                        "color": "#D29922"
+                      }
+                    }
+                  },
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": ".* · .*",
+                      "result": {
+                        "color": "#D29922"
+                      }
+                    }
+                  },
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": "^충전.*",
+                      "result": {
+                        "color": "#58A6FF"
+                      }
+                    }
+                  },
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": "^대기$",
+                      "result": {
+                        "color": "#3FB950"
+                      }
+                    }
+                  },
+                  {
+                    "type": "regex",
+                    "options": {
+                      "pattern": ".*",
+                      "result": {
+                        "color": "#6B7280"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "전압"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "volt"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FACC15"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "전류"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "mamp"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FB923C"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "온도"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "celsius"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#F87171"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "이상 점수"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#3FB950",
+                      "value": null
+                    },
+                    {
+                      "color": "#D29922",
+                      "value": 0.6
+                    },
+                    {
+                      "color": "#F85149",
+                      "value": 0.8
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "오늘 가동"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#F85149",
+                      "value": null
+                    },
+                    {
+                      "color": "#D29922",
+                      "value": 95
+                    },
+                    {
+                      "color": "#3FB950",
+                      "value": 98
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "$charger · 30분 흐름",
+      "description": "주황 실선 = 전류(왼쪽 축 0~3 mA, 넘으면 자동 확장, 부하를 꽂고 빼면 계단) · 빨강 점선 = 온도(오른쪽 축 15~45 ℃)",
+      "repeat": "charger",
+      "repeatDirection": "h",
+      "maxPerRow": 3,
+      "timeFrom": "30m",
+      "hideTimeOverride": true,
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Mixed --"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT ts AS time, current_a * 1000 AS \"전류\" FROM meter_sample WHERE charger_id = '$charger' AND $__timeFilter(ts) ORDER BY 1"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (charger_id) (chargeops_charger_temp_celsius{charger_id=\"$charger\"})",
+          "legendFormat": "온도"
+        }
+      ],
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": 60000,
+            "axisGridShow": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "전류"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FB923C"
+                }
+              },
+              {
+                "id": "unit",
+                "value": "mamp"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "left"
+              },
+              {
+                "id": "custom.axisSoftMin",
+                "value": 0
+              },
+              {
+                "id": "custom.axisSoftMax",
+                "value": 3
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "stepAfter"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 12
+              },
+              {
+                "id": "custom.gradientMode",
+                "value": "opacity"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "온도"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#F87171"
+                }
+              },
+              {
+                "id": "unit",
+                "value": "celsius"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisSoftMin",
+                "value": 15
+              },
+              {
+                "id": "custom.axisSoftMax",
+                "value": 45
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 61,
+      "type": "row",
+      "title": "공공 API · 제주 충전기 (참고)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 9,
+      "type": "bargauge",
+      "title": "공공 API · 오늘 호출 / 한도 1,000",
+      "description": "공공데이터포털 인증키 하루 한도. 5분 수집이면 하루 약 289회. 700 노랑 · 900 빨강",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT coalesce(sum(api_calls), 0) AS \"오늘 호출\" FROM collect_log WHERE started_at >= date_trunc('day', now())"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1000,
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3FB950",
+                "value": null
+              },
+              {
+                "color": "#D29922",
+                "value": 700
+              },
+              {
+                "color": "#F85149",
+                "value": 900
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "공공 API · 마지막 회차",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 20,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT CASE WHEN status = 'ok' THEN '성공' ELSE '실패' END AS \"결과\", rows_fetched AS \"받은 건수\", rows_loaded AS \"변경\", to_char(started_at, 'HH24:MI') AS \"시각\" FROM collect_log WHERE operation = 'getChargerStatus' ORDER BY started_at DESC LIMIT 1"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "text": {
+          "titleSize": 11,
+          "valueSize": 18
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#C9CED6"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "결과"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "성공": {
+                        "color": "#3FB950"
+                      },
+                      "실패": {
+                        "color": "#F85149"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "공공 API · 오늘 성공 / 실패",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 5,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT count(*) FILTER (WHERE status = 'ok') AS \"성공\", count(*) FILTER (WHERE status <> 'ok') AS \"실패\" FROM collect_log WHERE started_at >= date_trunc('day', now())"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "text": {
+          "titleSize": 11,
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "성공"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3FB950"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "실패"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "#6B7280",
+                      "value": null
+                    },
+                    {
+                      "color": "#F85149",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "type": "state-timeline",
+      "title": "공공 API · 24시간 수집 (5분 단위)",
+      "description": "초록 = 수집됨 · 회색 = 빈 시간(VM 꺼짐 등, 그 시간의 상태 변화는 복구 불가) · 빨강 = 실패",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "gridPos": {
+        "x": 17,
+        "y": 20,
+        "w": 7,
+        "h": 5
+      },
+      "timeFrom": "24h",
+      "hideTimeOverride": true,
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT b AS time,\n  CASE WHEN bool_or(l.status = 'ok') THEN 1 WHEN count(l.started_at) > 0 THEN -1 ELSE 0 END AS \"수집\"\nFROM generate_series(date_trunc('hour', now() - interval '24 hours'), now(), interval '5 minutes') b\nLEFT JOIN collect_log l ON l.operation = 'getChargerStatus' AND l.started_at >= b AND l.started_at < b + interval '5 minutes'\nGROUP BY b ORDER BY b"
+        }
+      ],
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8,
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#F85149",
+                "value": null
+              },
+              {
+                "color": "#4B5563",
+                "value": -0.5
+              },
+              {
+                "color": "#3FB950",
+                "value": 0.5
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "range",
+              "options": {
+                "from": 0.5,
+                "to": 1.5,
+                "result": {
+                  "text": "수집",
+                  "color": "#3FB950"
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": -0.5,
+                "to": 0.5,
+                "result": {
+                  "text": "빈 시간",
+                  "color": "#4B5563"
+                }
+              }
+            },
+            {
+              "type": "range",
+              "options": {
+                "from": -1.5,
+                "to": -0.5,
+                "result": {
+                  "text": "실패",
+                  "color": "#F85149"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "geomap",
+      "title": "제주 공공 충전기 — 문제만 밝게 (참고용 · 우리가 조치할 대상 아님)",
+      "description": "흐린 초록 = 대기 · 충전 중, 노랑 = 통신 이상, 빨강 = 고장 · 운영중지 · 점검중. 점 위에 마우스를 올리면 충전소 이름",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 14,
+        "h": 12
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT s.lat AS latitude, s.lng AS longitude, fn_status_group(cur.status_code) AS \"상태\", c.charger_id AS \"충전기\", s.name AS \"충전소\"\nFROM charger_status_current cur JOIN charger c USING (charger_id) JOIN station s USING (station_id)\nWHERE s.region_code = '50' AND c.source = 'public' AND s.lat IS NOT NULL AND fn_status_group(cur.status_code) IN ('대기', '충전 중')"
+        },
+        {
+          "refId": "B",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT s.lat AS latitude, s.lng AS longitude, fn_status_group(cur.status_code) AS \"상태\", c.charger_id AS \"충전기\", s.name AS \"충전소\", cs.name AS \"세부 상태\"\nFROM charger_status_current cur JOIN charger c USING (charger_id) JOIN station s USING (station_id) JOIN code_status cs ON cs.code = cur.status_code\nWHERE s.region_code = '50' AND c.source = 'public' AND s.lat IS NOT NULL AND fn_status_group(cur.status_code) IN ('통신 이상', '고장·중지')"
+        }
+      ],
+      "options": {
+        "view": {
+          "id": "coords",
+          "lat": 33.38,
+          "lon": 126.55,
+          "zoom": 9.6
+        },
+        "controls": {
+          "showZoom": true,
+          "mouseWheelZoom": true,
+          "showAttribution": true
+        },
+        "basemap": {
+          "type": "carto",
+          "name": "어두운 지도",
+          "config": {
+            "theme": "dark",
+            "showLabels": true
+          }
+        },
+        "layers": [
+          {
+            "type": "markers",
+            "name": "정상",
+            "filterData": {
+              "id": "byRefId",
+              "options": "A"
+            },
+            "location": {
+              "mode": "coords",
+              "latitude": "latitude",
+              "longitude": "longitude"
+            },
+            "config": {
+              "showLegend": false,
+              "style": {
+                "size": {
+                  "fixed": 2
+                },
+                "opacity": 0.22,
+                "color": {
+                  "fixed": "#3FB950"
+                },
+                "symbol": {
+                  "mode": "fixed",
+                  "fixed": "img/icons/marker/circle.svg"
+                }
+              }
+            },
+            "tooltip": false
+          },
+          {
+            "type": "markers",
+            "name": "문제",
+            "filterData": {
+              "id": "byRefId",
+              "options": "B"
+            },
+            "location": {
+              "mode": "coords",
+              "latitude": "latitude",
+              "longitude": "longitude"
+            },
+            "config": {
+              "showLegend": true,
+              "style": {
+                "size": {
+                  "fixed": 6
+                },
+                "opacity": 0.95,
+                "color": {
+                  "field": "상태",
+                  "fixed": "#F85149"
+                },
+                "symbol": {
+                  "mode": "fixed",
+                  "fixed": "img/icons/marker/circle.svg"
+                }
+              }
+            },
+            "tooltip": true
+          }
+        ],
+        "tooltip": {
+          "mode": "details"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "통신 이상": {
+                  "color": "#D29922"
+                },
+                "고장·중지": {
+                  "color": "#F85149"
+                },
+                "대기": {
+                  "color": "#3FB950"
+                },
+                "충전 중": {
+                  "color": "#58A6FF"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#6B7280",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "이용 가능률 — 우리 vs 제주",
+      "description": "지금 이용 가능한(고장 · 통신이상 · 운영중지 · 점검중이 아닌) 충전기 비율. 제주는 상태를 모르는 충전기 제외",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "gridPos": {
+        "x": 14,
+        "y": 25,
+        "w": 10,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT\n (SELECT round(100.0 * count(*) FILTER (WHERE NOT cs.is_down) / nullif(count(*), 0), 1) FROM charger c JOIN charger_status_current cur USING (charger_id) JOIN code_status cs ON cs.code = cur.status_code WHERE c.source = 'model' AND NOT c.is_deleted) AS \"우리\",\n (SELECT round(100.0 * count(*) FILTER (WHERE NOT cs.is_down) / nullif(count(*), 0), 1) FROM charger c JOIN charger_status_current cur USING (charger_id) JOIN code_status cs ON cs.code = cur.status_code JOIN station s USING (station_id) WHERE s.region_code = '50' AND c.source = 'public' AND cur.status_code NOT IN ('0', '9')) AS \"제주 평균\""
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "text": {
+          "titleSize": 12,
+          "valueSize": 26
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "우리"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#22D3EE"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "제주 평균"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#9AA1AC"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 15,
+      "type": "barchart",
+      "title": "지금 상태 분포 (%) — 같은 색 · 같은 순서",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "gridPos": {
+        "x": 14,
+        "y": 29,
+        "w": 10,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "WITH t AS (\n  SELECT CASE WHEN c.source = 'model' THEN '우리' ELSE '제주' END AS g, fn_status_group(cur.status_code) AS st\n  FROM charger_status_current cur JOIN charger c USING (charger_id) JOIN station s USING (station_id)\n  WHERE (s.region_code = '50' AND c.source = 'public') OR (c.source = 'model' AND NOT c.is_deleted))\nSELECT g AS \"구분\",\n  round(100.0 * count(*) FILTER (WHERE st = '대기') / count(*), 1) AS \"대기\",\n  round(100.0 * count(*) FILTER (WHERE st = '충전 중') / count(*), 1) AS \"충전 중\",\n  round(100.0 * count(*) FILTER (WHERE st = '통신 이상') / count(*), 1) AS \"통신 이상\",\n  round(100.0 * count(*) FILTER (WHERE st = '고장·중지') / count(*), 1) AS \"고장·중지\",\n  round(100.0 * count(*) FILTER (WHERE st = '모름') / count(*), 1) AS \"모름\"\nFROM t GROUP BY g ORDER BY g"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "xField": "구분",
+        "stacking": "normal",
+        "showValue": "auto",
+        "groupWidth": 0.6,
+        "barWidth": 0.9,
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "fillOpacity": 90,
+            "lineWidth": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "대기"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3FB950"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "충전 중"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#58A6FF"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "통신 이상"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#D29922"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "고장·중지"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#F85149"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "모름"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#4B5563"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 16,
+      "type": "stat",
+      "title": "오늘 해소",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 37,
+        "w": 8,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT count(*) AS \"해소\", round(avg(resolve_sec))::int AS \"MTTR · 평균 처리\",\n (SELECT round(100.0 * count(*) FILTER (WHERE status = 'ok') / nullif(count(*), 0), 1) FROM v_ops_notify WHERE sent_at >= date_trunc('day', now()) AND channel IN ('slack', 'mail')) AS \"알림 전송\"\nFROM v_ops_incidents WHERE resolved_at >= date_trunc('day', now()) AND severity <> 'SEV4'"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "text": {
+          "titleSize": 11,
+          "valueSize": 20
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#3FB950"
+          },
+          "noValue": "-"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "MTTR · 평균 처리"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#22D3EE"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "알림 전송"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 17,
+      "type": "table",
+      "title": "최근 해소",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 37,
+        "w": 16,
+        "h": 5
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code",
+          "rawSql": "SELECT to_char(resolved_at, 'MM-DD HH24:MI') AS \"해소\", coalesce(charger_id, '-') AS \"충전기\", title AS \"무슨 일\", coalesce(owner, '자동 회복') AS \"담당\",\n  CASE WHEN resolve_sec < 60 THEN resolve_sec || '초' WHEN resolve_sec < 3600 THEN resolve_sec / 60 || '분 ' || resolve_sec % 60 || '초' ELSE resolve_sec / 3600 || '시간 ' || resolve_sec % 3600 / 60 || '분' END AS \"소요\"\nFROM v_ops_incidents WHERE status = 'resolved' AND severity <> 'SEV4' ORDER BY resolved_at DESC LIMIT 5"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "해소"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "충전기"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "담당"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "소요"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 90
+              },
+              {
+                "id": "custom.align",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "추세 — 7일 가동률 · 이상 점수 · 제주 운영기관",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 42,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "일 가동률 — 우리 vs 제주 평균 (%)",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 43,
+            "w": 12,
+            "h": 8
+          },
+          "timeFrom": "8d",
+          "targets": [
+            {
+              "refId": "A",
+              "format": "time_series",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT m.day::timestamptz AS time, CASE WHEN c.source = 'model' THEN '우리' ELSE '제주 평균' END AS metric, round(avg(m.uptime_pct), 2) AS value\nFROM mv_daily_uptime m JOIN charger c USING (charger_id) JOIN station s USING (station_id)\nWHERE (s.region_code = '50' AND c.source = 'public') OR c.source = 'model'\nGROUP BY 1, 2 ORDER BY 1"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "decimals": 2,
+              "custom": {
+                "lineWidth": 2,
+                "showPoints": "always",
+                "pointSize": 6
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "우리"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#22D3EE"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "제주 평균"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#9AA1AC"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "description": "모형 충전기를 밤에 꺼 두는 시간도 다운으로 계산 (예: 10/22 CH-02 19:09 통신이상 → 다음 날 09:01 복귀). 실제 장애 시간은 MTTR 패널 참고"
+        },
+        {
+          "id": 22,
+          "type": "timeseries",
+          "title": "이상 점수 (0~1) — 0.6 주의 · 0.8 경고",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 43,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "time_series",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT bucket AS time, charger_id AS metric, score FROM v_anomaly_score WHERE charger_id LIKE 'CH-%' AND $__timeFilter(bucket) ORDER BY 1"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "min": 0,
+              "max": 1,
+              "decimals": 2,
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "lineWidth": 2,
+                "thresholdsStyle": {
+                  "mode": "line+area"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "transparent",
+                    "value": null
+                  },
+                  {
+                    "color": "rgba(210,153,34,0.15)",
+                    "value": 0.6
+                  },
+                  {
+                    "color": "rgba(248,81,73,0.15)",
+                    "value": 0.8
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 23,
+          "type": "table",
+          "title": "제주 운영기관 — 다운이 많은 순 (참고)",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 51,
+            "w": 24,
+            "h": 7
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT coalesce(o.name, s.operator_id) AS \"운영기관\", count(*) AS \"충전기\",\n  count(*) FILTER (WHERE cs.is_down) AS \"다운\", count(*) FILTER (WHERE cur.status_code = '3') AS \"충전 중\",\n  round(100.0 * count(*) FILTER (WHERE NOT cs.is_down) / count(*), 1) AS \"이용 가능률\"\nFROM charger_status_current cur JOIN charger c USING (charger_id) JOIN station s USING (station_id)\nJOIN code_status cs ON cs.code = cur.status_code LEFT JOIN operator o ON o.operator_id = s.operator_id\nWHERE s.region_code = '50' AND c.source = 'public' GROUP BY 1 ORDER BY 3 DESC, 2 DESC LIMIT 10"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "left"
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "다운"
+                },
+                "properties": [
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "#9AA1AC",
+                          "value": null
+                        },
+                        {
+                          "color": "#D29922",
+                          "value": 5
+                        },
+                        {
+                          "color": "#F85149",
+                          "value": 20
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "이용 가능률"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "percent"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "감사 — 조치 이력 · 역할 · 알림 전송 실패",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 31,
+          "type": "table",
+          "title": "조치 이력 — 누가 · 언제 · 무엇을 · 결과 (선택한 기간)",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 44,
+            "w": 16,
+            "h": 10
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT to_char(created_at, 'MM-DD HH24:MI:SS') AS \"시각\", who AS \"누가\", charger_id AS \"충전기\", what AS \"무엇을\", result AS \"결과\", coalesce(approved_by, '') AS \"승인\", reason AS \"사유\"\nFROM v_ops_actions WHERE $__timeFilter(created_at) ORDER BY action_id DESC LIMIT 200"
+            }
+          ],
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "show": false
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "left"
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "시각"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 120
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "결과"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 80
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  },
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "type": "value",
+                        "options": {
+                          "성공": {
+                            "color": "#3FB950"
+                          },
+                          "실행": {
+                            "color": "#3FB950"
+                          },
+                          "거부": {
+                            "color": "#F85149"
+                          },
+                          "실패": {
+                            "color": "#F85149"
+                          },
+                          "거절": {
+                            "color": "#F85149"
+                          },
+                          "응답 없음": {
+                            "color": "#F85149"
+                          },
+                          "보류": {
+                            "color": "#D29922"
+                          },
+                          "승인 요청": {
+                            "color": "#58A6FF"
+                          },
+                          "횟수 제한": {
+                            "color": "#D29922"
+                          },
+                          "만료": {
+                            "color": "#6B7280"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": 32,
+          "type": "table",
+          "title": "지금 역할",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 44,
+            "w": 8,
+            "h": 10
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT name AS \"이름\", role AS \"역할\", to_char(valid_from, 'MM-DD') AS \"부여일\", granted_by AS \"준 사람\" FROM v_ops_roles ORDER BY CASE role WHEN 'Admin' THEN 1 WHEN 'Lead' THEN 2 WHEN 'Operator' THEN 3 ELSE 4 END, name"
+            }
+          ],
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "show": false
+            }
+          }
+        },
+        {
+          "id": 33,
+          "type": "table",
+          "title": "알림 전송 실패 (선택한 기간)",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 54,
+            "w": 24,
+            "h": 6
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "editorMode": "code",
+              "rawSql": "SELECT to_char(sent_at, 'MM-DD HH24:MI:SS') AS \"시각\", channel AS \"채널\", incident_id AS \"장애\", detail AS \"오류\" FROM v_ops_notify WHERE status <> 'ok' AND $__timeFilter(sent_at) ORDER BY id DESC LIMIT 50"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "실패 없음"
+            }
+          },
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "show": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "시스템 상세 — DB · 백업 · OCPP",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 41,
+          "type": "timeseries",
+          "title": "DB 복제 지연 (초)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 45,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "max by (instance) (pg_replication_lag_seconds and on(instance) pg_replication_is_replica == 1)",
+              "legendFormat": "{{instance}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "#22D3EE"
+              }
+            }
+          }
+        },
+        {
+          "id": 42,
+          "type": "timeseries",
+          "title": "DB 연결 수",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 45,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (instance) (pg_stat_database_numbackends)",
+              "legendFormat": "{{instance}}"
+            }
+          ]
+        },
+        {
+          "id": 43,
+          "type": "timeseries",
+          "title": "WAL 보관 경과 (초) — 평소 60초 안",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 52,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "pg_stat_archiver_last_archive_age and on(instance) pg_replication_is_replica == 0",
+              "legendFormat": "{{instance}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "#9AA1AC"
+              }
+            }
+          }
+        },
+        {
+          "id": 44,
+          "type": "timeseries",
+          "title": "OCPP 메시지 / 초 · 리셋 결과(10분)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 52,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (action) (rate(chargeops_ocpp_messages_total[1m]))",
+              "legendFormat": "{{action}}"
+            },
+            {
+              "refId": "B",
+              "expr": "sum by (type, result) (increase(chargeops_reset_total[10m])) > 0",
+              "legendFormat": "리셋 {{type}} {{result}}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 45,
+      "type": "row",
+      "title": "DB 품질 · MTTR",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 45,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 46,
+      "type": "stat",
+      "title": "데이터 품질 점수 (최근 · 7항목 평균)",
+      "description": "매일 02:00 dq-job 이 전날 데이터를 7항목(누락·중복·이상값 등)으로 점검",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT round(avg(score) * 100, 1) AS \"품질 점수\" FROM dq_result WHERE check_date = (SELECT max(check_date) FROM dq_result)"
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 46,
+        "w": 6,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#F85149",
+                "value": null
+              },
+              {
+                "color": "#D29922",
+                "value": 70
+              },
+              {
+                "color": "#3FB950",
+                "value": 80
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 47,
+      "type": "stat",
+      "title": "MTTR 중앙값 (7일)",
+      "description": "긴 장애 1건에 흔들리지 않게 7일 일별 MTTR 의 중앙값으로 표시 (실물 모형 기준)",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT round(percentile_cont(0.5) WITHIN GROUP (ORDER BY mttr_min)::numeric, 1) AS \"MTTR 중앙값(분)\" FROM stat_operator_daily WHERE mttr_min IS NOT NULL AND day >= current_date - 7"
+        }
+      ],
+      "gridPos": {
+        "x": 6,
+        "y": 46,
+        "w": 6,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#22D3EE",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#22D3EE"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 48,
+      "type": "timeseries",
+      "title": "MTTR — 우리 충전기 (일별, 분)",
+      "description": "실물 모형(CH-01~03)에서 해소된 장애 기준. 10/21 은 밤사이 통신 두절 1건(891분)이 포함돼 크게 튐",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "chargeops-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT day::timestamptz AS time, mttr_min AS \"MTTR(분)\", fault_cnt AS \"고장 수\" FROM stat_operator_daily WHERE mttr_min IS NOT NULL AND day >= current_date - 14 ORDER BY 1"
+        }
+      ],
+      "timeFrom": "14d",
+      "gridPos": {
+        "x": 12,
+        "y": 46,
+        "w": 12,
+        "h": 5
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "showPoints": "never"
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#22D3EE"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "고장 수"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#9AA1AC"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    }
+  ]
+}
