@@ -51,7 +51,7 @@ kubectl -n argocd get applications \
 
 새 파라미터가 보이지 않으면 Job을 한 번 실행해 정의를 읽힌 뒤 설정한다. 이후 BUILD_ALL_IMAGES=false로 사용한다. SCM polling은 H/5 * * * * 이다.
 
-CI와 CSMS Dev 검증 통과 후 kim_chanju → dev PR을 생성한다. 열린 PR은 재사용한다. **이 Job은 Ops를 변경하지 않는다.** CSMS 미변경 시 CI 확인 후 PR만 생성하며 Dev CSMS 검증 완료로 표시하지 않는다.
+CI와 CSMS Dev 검증 통과 후 kim_chanju → dev PR을 생성한다. 열린 PR은 재사용한다. **이 Job이 PR 승인·Merge를 최대 45분 기다린 뒤 검증한 동일 digest를 Ops로 승격한다.** CSMS 미변경 시 CI 확인 후 PR만 생성하며 Dev CSMS 검증 완료로 표시하지 않는다.
 
 dev가 예전 infra/app 구조라면 첫 PR에 루트 apps 및 Jenkinsfile 전환도 포함될 수 있다. 전체 Diff를 리뷰한다. notifier 등 다른 앱은 빌드·Push만 자동화되며 운영 반영은 별도다.
 
@@ -66,30 +66,28 @@ dev가 예전 infra/app 구조라면 첫 PR에 루트 apps 및 Jenkinsfile 전�
 
 chargeops/dev-integration은 CSMS 변경에만 등록하는 추가 상태다. 모든 PR에 필수로 걸면 CSMS 미변경 PR이 대기하므로 공통 필수 체크는 chargeops/ci를 사용한다. Jenkins도 최신 변경 승인과 승인자의 저장소 쓰기 권한을 검증한다. 자동 승인·Merge는 하지 않는다.
 
-## 4. dev Merge 감지용 Jenkins Job
+## 4. 단일 배포 Job 유지
 
-kim_chanju Job을 유지하고, New Item → Pipeline → Copy from chargeops-ci로 **chargeops-ci-dev**를 만든다.
-
-- SCM 저장소 동일, Branch Specifier만 ***/dev**, Script Path **Jenkinsfile**.
-- Credential ID와 Application 이름 동일.
-- **ENABLE_ENVIRONMENT_CD=true, ENABLE_CANARY=true**. 최초만 BUILD_ALL_IMAGES=true.
-- dev에 루트 Jenkinsfile이 들어오는 첫 PR Merge 이후 실행한다. 최초 수동 실행이 SCM polling과 파라미터를 초기화한다.
-
-이후 승인·Merge된 dev 변경을 감지하고 Merge 코드를 빌드·Dev 재검증한 동일 Digest를 Ops로 승격한다. 승인 또는 검증 실패 시 Ops 승격을 진행하지 않는다. 시연·부하 시험 중에는 이 **dev 승격 Job을 일시 중지**하고 Merge를 보류한다.
+별도 dev 브랜치 배포 Job은 만들지 않는다. 기존 chargeops-ops-ci / chargeops-ci-dev는 Disable한다.
+chargeops-ci의 같은 실행이 Dev 검증 → PR 생성 → 승인·Merge 대기 → Ops 승격까지 수행한다.
+대기 중 mgmt-agent executor는 점유된다. Approve만으로는 진행하지 않는다.
+Merge 결과 apps 빌드 컨텍스트가 후보와 다르면 재빌드·재검증이 필요하다.
 
 ## 5. 확인 순서
 
-1. kim_chanju Push: CI started → Dev verification passed → Source PR ready → Pipeline succeeded 알림. Ops 이미지는 그대로여야 한다.
-2. 다른 사람이 PR 최신 변경 승인 후 dev Merge: dev Job의 Validate reviewed dev merge 통과.
-3. Dev 재검증 성공: Ops Canary started 알림 후 Canary 완료와 Pipeline succeeded 확인.
-4. 기존 Canary 실패 시험은 부하가 없는 시간에 수행한다. Recovery completed 알림과 Jenkins의 “Recovery complete: previous Git digest restored and stable Rollout verified”를 확인한다. 실패 배포의 최종 빌드는 FAILURE로 남는 것이 정상이다.
-5. Recovery failed면 새 승격을 중단하고 production-delivery.json과 복구 로그를 확인한다. receipt나 Deployment/PVC/Rollout을 지워서 재시도하지 않는다.
+1. kim_chanju 빌드의 Dev verification passed와 Source PR ready를 확인한다.
+2. Wait for source PR approval and merge 단계에서 대기하며 Ops digest가 유지되는지 확인한다.
+3. 다른 사람이 최신 head를 Approve하고 Merge한다.
+4. 같은 Jenkins 실행이 승인 검증 → 동일 digest Ops 승격 → Canary까지 이어지는지 확인한다.
+5. 실패하면 recovery receipt와 Git 복원·안정 Rollout 확인 로그를 확인한다. 미완료 receipt를 삭제하지 않는다.
 
-Slack 오류는 토큰 없이 경고만 남긴다. 알림이 없으면 Credential ID, 봇 채널 참여, chat:write, agent의 Slack API 연결을 확인한다. 로컬 테스트는 실제 PR 생성·Slack 전송·운영 Sync 성공을 대신하지 않는다.
+PR 준비 시 chargeops/ci 성공을 먼저 기록한다. 최종 Ops 완료를 기다려야 Merge할 수 있는 순환 대기를 막는다.
+전체 흐름과 환경 매핑은 [단일 Job 배포 안내](environment-delivery.md)를 따른다.
 
 ## 6. PR 승인·수정 요청·종료·Merge 알림 Job
 
-CI Job은 PR을 생성한 뒤 종료되므로, 이후 발생하는 리뷰·종료 알림은 별도의 **관찰 전용 Job**이 담당한다. GitHub Actions Secret이나 새 토큰, Webhook 서버는 필요 없다. 기존 Jenkins Credential 두 개를 재사용한다.
+리뷰·종료 알림은 선택적인 **관찰 전용 Job**이 담당한다. 배포 Job의 승인·Merge 확인과 별개다.
+배포 Job이 대기하며 executor를 점유하므로, 알림 Job은 별도 executor가 있어야 동시에 실행된다. GitHub Actions Secret이나 새 토큰, Webhook 서버는 필요 없다. 기존 Jenkins Credential 두 개를 재사용한다.
 
 Jenkins에서 최초 한 번 설정한다.
 
@@ -105,7 +103,7 @@ Jenkins에서 최초 한 번 설정한다.
 | Review → Approve | PR 리뷰 승인 / 리뷰어 / PR 링크 | 아직 Merge 전이므로 이 이벤트만으로 Ops 배포하지 않음 |
 | Review → Request changes | PR 수정 요청 / 리뷰어 / PR 링크 | 수정 요청. PR을 닫거나 배포하지 않음 |
 | Close pull request (Merge 없음) | PR 거부·종료 / PR 링크 | Ops 승격 없음. Dev 자동 롤백 없음 |
-| PR Merge | PR Merge 완료 / 처리자 / PR 링크 | 별도 dev Job의 CI·Dev 재검증 대상. 배포 완료 알림은 별도 |
+| PR Merge | PR Merge 완료 / 처리자 / PR 링크 | 대기 중인 기존 빌드가 재검증 후 같은 digest를 Ops로 승격. 배포 완료 알림은 별도 |
 
 대상은 앱 저장소의 **kim_chanju → dev** PR이다. 댓글, 이모지 반응, 다른 브랜치 PR에는 결정 알림을 보내지 않는다. 이전 커밋에 대한 리뷰는 최신 변경 승인과 구분해서 표시한다. 이 알림은 기존 Jenkins 운영 승인 검증을 대체하거나 완화하지 않는다.
 

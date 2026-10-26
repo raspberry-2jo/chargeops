@@ -27,15 +27,15 @@ pipeline {
     skipDefaultCheckout(true)
     timeout(time: 120, unit: 'MINUTES')
   }
-  // Preview job: */kim_chanju. Production job: */dev. Both use root Jenkinsfile.
+  // Single delivery job: */kim_chanju; wait for PR approval+merge in this build.
   triggers { pollSCM('H/5 * * * *') }
   parameters {
     booleanParam(name: 'BUILD_ALL_IMAGES', defaultValue: false,
       description: 'Build all six images. The first build automatically builds all images.')
     booleanParam(name: 'ENABLE_ENVIRONMENT_CD', defaultValue: true,
-      description: 'CSMS CD: kim_chanju verifies Dev and opens a PR; an independently reviewed dev merge verifies again and promotes ops.')
+      description: 'Single Job: kim_chanju verifies Dev, opens PR, waits for approval+merge, then promotes the same digest to ops.')
     booleanParam(name: 'ENABLE_CANARY', defaultValue: true,
-      description: 'Required for dev production delivery: 25/50/100 percent CSMS Canary with automatic Git recovery. Preview never promotes ops.')
+      description: 'After approved PR merge, promote the same Dev-verified CSMS digest through Ops 25/50/100 percent Canary with Git recovery.')
     choice(name: 'DEV_DELIVERY_MODE', choices: ['auto', 'deployment', 'canary'],
       description: 'Auto follows the verified Dev Application path; canary is separate from ENABLE_CANARY for ops.')
     booleanParam(name: 'RUN_OCPP_FIXTURE_TEST', defaultValue: false,
@@ -76,7 +76,7 @@ pipeline {
           def checkoutVars = checkout scm
           env.CHECKOUT_BRANCH = (env.BRANCH_NAME ?: checkoutVars.GIT_BRANCH ?: env.GIT_BRANCH ?: '')
             .replaceFirst(/^refs\/heads\//, '').replaceFirst(/^origin\//, '')
-          env.PUBLISH_IMAGES = ([env.PUBLISH_BRANCH, env.PRODUCTION_BRANCH].contains(env.CHECKOUT_BRANCH) && !env.CHANGE_ID).toString()
+          env.PUBLISH_IMAGES = (env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH && !env.CHANGE_ID).toString()
           env.SOURCE_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
           def sha = sh(script: 'git rev-parse --short=12 HEAD', returnStdout: true).trim()
           def tagBranch = env.CHECKOUT_BRANCH == env.PRODUCTION_BRANCH ? 'dev' : 'kim_chanju'
@@ -167,24 +167,13 @@ pipeline {
         '''
       }
     }
-    stage('Validate reviewed dev merge') {
-      when { expression { params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' && env.CHECKOUT_BRANCH == env.PRODUCTION_BRANCH && env.APP_CHANGED == 'true' } }
-      steps {
-        script {
-          if (!params.ENABLE_CANARY) { error('dev production delivery requires ENABLE_CANARY=true') }
-        }
-        withCredentials([string(credentialsId: params.GITHUB_PR_CREDENTIAL_ID.trim(), variable: 'GITHUB_PR_TOKEN')]) {
-          sh '.ci-venv/bin/python scripts/github_cd.py validate-merge --source "$SOURCE_COMMIT"'
-        }
-      }
-    }
     stage('Registry Build and Push: changed images only') {
       when { expression { env.BUILD_IMAGES?.trim() } }
       steps {
         sh '''
           set -eu
           if [ "$PUBLISH_IMAGES" = 'true' ]; then
-            if { [ "$CHECKOUT_BRANCH" != "$PUBLISH_BRANCH" ] && [ "$CHECKOUT_BRANCH" != "${PRODUCTION_BRANCH:-dev}" ]; } || [ -n "${CHANGE_ID:-}" ]; then
+            if [ "$CHECKOUT_BRANCH" != "$PUBLISH_BRANCH" ] || [ -n "${CHANGE_ID:-}" ]; then
               echo 'Image publication requires the configured non-PR branch.' >&2
               exit 1
             fi
@@ -301,13 +290,33 @@ pipeline {
             }
           }
         }
-        script { notifyDelivery('Source PR ready') }
+        script {
+          // The required source check must pass before merge; waiting until
+          // post would deadlock a PR protected by chargeops/ci.
+          githubStatus('success', 'chargeops/ci')
+          notifyDelivery('Source PR ready')
+        }
+      }
+    }
+    stage('Wait for source PR approval and merge') {
+      when {
+        expression {
+          params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' && env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH &&
+            (env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')
+        }
+      }
+      steps {
+        timeout(time: 46, unit: 'MINUTES') {
+          withCredentials([string(credentialsId: params.GITHUB_PR_CREDENTIAL_ID.trim(), variable: 'GITHUB_PR_TOKEN')]) {
+            sh '.ci-venv/bin/python scripts/github_cd.py wait-merge --timeout 2700'
+          }
+        }
       }
     }
     stage('Promote verified digest to ops GitOps') {
       when {
         expression {
-          params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' && env.CHECKOUT_BRANCH == env.PRODUCTION_BRANCH &&
+          params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' && env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH &&
             (env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')
         }
       }

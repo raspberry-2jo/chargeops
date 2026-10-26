@@ -95,6 +95,60 @@ def approved_merge(source):
     raise cd.DeliveryPreflightError('dev must be merged through a PR approved by another person on its latest head')
 
 
+def apps_tree(source):
+    document = api('GET', '/repos/' + REPOSITORY + '/git/trees/' + sha(source))
+    apps = [item['sha'] for item in document.get('tree', [])
+            if item.get('path') == 'apps' and item.get('type') == 'tree']
+    if len(apps) != 1:
+        raise cd.DeliveryPreflightError('Cannot bind the merged apps build context to the verified image')
+    return apps[0]
+
+
+def approved_candidate(candidate, pr_path='artifacts/pull-request.json'):
+    """Revalidate the exact PR, its merge/reviews and its image build context."""
+    if not cd.Path(pr_path).is_file():
+        raise cd.DeliveryPreflightError('A reviewed source PR receipt is required before Ops promotion')
+    saved = cd.load(pr_path)
+    if saved.get('source') != candidate['source'] or saved.get('image') != candidate['image']:
+        raise cd.DeliveryPreflightError('Source PR does not belong to the verified candidate')
+    number = int(saved['number'])
+    pr = api('GET', '/repos/' + REPOSITORY + '/pulls/' + str(number))
+    if not pr.get('merged') or pr.get('head', {}).get('sha') != candidate['source']:
+        raise cd.DeliveryPreflightError('Verified source PR must be merged without changing its head')
+    result = approved_merge(sha(pr.get('merge_commit_sha', '')))
+    if result['number'] != number or result['head'] != candidate['source']:
+        raise cd.DeliveryPreflightError('Merged PR is not the verified source PR')
+    if apps_tree(candidate['source']) != apps_tree(result['source']):
+        raise cd.DeliveryPreflightError('Merge changed the apps build context; rebuild and reverify before Ops')
+    result.update(candidate_source=candidate['source'], image=candidate['image'])
+    return result
+
+
+def wait_for_merge(candidate_path, receipt_path, pr_path, output, timeout=2700, interval=15):
+    if os.environ.get('CHECKOUT_BRANCH') != 'kim_chanju' or os.environ.get('CHANGE_ID'):
+        raise cd.DeliveryPreflightError('Only the original trusted preview build may wait for source approval')
+    candidate, receipt, saved = cd.load(candidate_path), cd.load(receipt_path), cd.load(pr_path)
+    cd.validate_receipt(candidate, receipt, time.time())
+    if saved.get('source') != candidate['source'] or saved.get('image') != candidate['image']:
+        raise cd.DeliveryPreflightError('Source PR does not belong to this Dev verification')
+    deadline = time.monotonic() + timeout
+    print('Waiting for source PR #' + str(saved['number']) + ' approval AND merge; Ops unchanged', flush=True)
+    while time.monotonic() < deadline:
+        cd.validate_receipt(candidate, receipt, time.time())
+        pr = api('GET', '/repos/' + REPOSITORY + '/pulls/' + str(int(saved['number'])))
+        if pr.get('head', {}).get('sha') != candidate['source']:
+            raise cd.DeliveryPreflightError('PR head changed while waiting; verify the new source')
+        if pr.get('merged'):
+            approval = approved_candidate(candidate, pr_path)
+            cd.save(output, approval)
+            print('Source PR approved and merged; same verified image may continue to Ops', flush=True)
+            return approval
+        if pr.get('state') == 'closed':
+            raise cd.DeliveryPreflightError('Source PR closed without merge; Ops unchanged')
+        time.sleep(interval)
+    raise cd.DeliveryPreflightError('Source approval/merge wait timed out; Ops unchanged')
+
+
 def status(source, state, context=CONTEXT):
     sha(source)
     if state not in ['pending', 'success', 'failure', 'error']:
@@ -124,8 +178,8 @@ def open_pr(repo, candidate_path, receipt_path, output):
     return source_pr(candidate['source'], output,
         'Dev integration checks passed for source `' + candidate['source'] + '`.\n\n'
         'Verified CSMS image: `' + candidate['image'] + '`.\n\n'
-        'Review the full source diff. Merge into dev authorizes the dev pipeline to rebuild and '
-        'verify the merged commit, then promote the same verified digest to ops. '
+        'Review the full source diff. Approval and merge resume this same Jenkins build. '
+        'It rechecks reviews and the merged apps tree, then promotes this exact Dev-verified digest to ops. '
         'Production has not been changed by this preview build.', candidate['image'])
 
 
@@ -160,7 +214,7 @@ def source_pr(source, output, body, image=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['validate-merge', 'status', 'open-pr', 'open-ci-pr'])
+    parser.add_argument('command', choices=['validate-merge', 'wait-merge', 'status', 'open-pr', 'open-ci-pr'])
     parser.add_argument('--source', default='')
     parser.add_argument('--state', default='pending')
     parser.add_argument('--context', default=CONTEXT)
@@ -168,11 +222,14 @@ def main():
     parser.add_argument('--candidate', default='artifacts/candidate.json')
     parser.add_argument('--receipt', default='artifacts/verification.json')
     parser.add_argument('--output', default='artifacts/pull-request.json')
+    parser.add_argument('--timeout', type=int, default=2700)
     args = parser.parse_args()
     if args.command == 'validate-merge':
         result = approved_merge(args.source)
         cd.save('artifacts/source-approval.json', result)
         print('Approved dev merge verified: PR #' + str(result['number']))
+    elif args.command == 'wait-merge':
+        wait_for_merge(args.candidate, args.receipt, args.output, 'artifacts/source-approval.json', args.timeout)
     elif args.command == 'status':
         status(args.source, args.state, args.context)
     elif args.command == 'open-ci-pr':

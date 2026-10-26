@@ -1,63 +1,76 @@
-# PR 승인 기반 Dev / Ops 배포
+# 단일 Jenkins Job의 PR 승인 기반 Dev / Ops 배포
 
-루트 Jenkinsfile을 사용한다. Dev는 namespace `dev`, 운영은 기존 `ops`를 유지한다. CI는 여섯 앱을 빌드하지만, 자동 환경 배포와 Canary는 **CSMS만** 대상으로 한다.
+기존 chargeops-ci Job 하나를 사용한다. 앱 저장소의 kim_chanju 브랜치를 빌드하며 자동 환경 배포 대상은 CSMS다.
 
 ```text
-kim_chanju Push → CI / 이미지 Push → CSMS 변경이면 Dev 배포·검증
-                                      ↓
-                         kim_chanju → dev PR 자동 생성
-                                      ↓
-                      다른 운영자의 최신 변경 승인 + Merge
-                                      ↓
-dev Jenkins Job → Merge 커밋 승인 확인 → CI / 이미지 Push
-                                      ↓
-                       CSMS Dev 재배포·통합 검증
-                                      ↓
-               검증한 동일 Digest로 GitOps main의 Ops 경로 변경
-                                      ↓
-                  Argo CD 선택 Sync → Ops Canary → 완료
-                                      ↓ 실패
-                  Abort → 이전 Git Digest 복원 → Sync·정상 검증
+chargeops/kim_chanju Push → CI·이미지 Push
+→ GitOps main의 Dev digest·검사 기준 시각 기록
+→ Argo CD Dev 자동 Sync → Dev Canary·통합 검증
+→ 앱 PR kim_chanju → dev 생성 → 같은 Jenkins 빌드에서 대기
+→ 다른 사람의 최신 커밋 Approve + Merge
+→ PR·승인·Merge 결과의 apps 트리·Dev 실행 digest 재확인
+→ Dev에서 검증한 동일 digest를 GitOps main의 Ops 경로에 기록
+→ Jenkins가 Ops 선택 Sync → Ops Canary → 완료
 ```
 
-승인 PR은 **앱 저장소 chargeops의 kim_chanju → dev** 이다. GitOps main은 기존처럼 Jenkins가 직접 갱신하므로 자동 복구를 위한 쓰기 권한을 유지한다. 별도 Jenkins input 승인은 사용하지 않는다.
+Approve만으로는 진행하지 않는다. Merge까지 완료해야 하며 최대 45분 기다린다.
+대기 중 빌드는 실행 상태이고 mgmt-agent executor를 점유한다. 승인·Merge는 사람이 수행한다.
+별도 dev 브랜치 배포 Job이나 Jenkins input 승인은 필요 없다. 기존 chargeops-ops-ci 또는 chargeops-ci-dev는 중지한다.
+새 Jenkinsfile로 dev 브랜치를 실행하면 CI만 수행하며 이미지 게시·환경 배포는 하지 않는다.
 
-dev Job은 현재 dev HEAD가 PR Merge 커밋인지, PR 최신 HEAD를 작성자 외 사람이 승인했는지, 승인자가 저장소 쓰기 권한을 갖는지 확인한다. 직접 Push, 오래된 빌드, 자기 승인, 봇 승인, 이전 변경 승인은 Ops 승격을 허용하지 않는다. 승격 직전에도 승인과 Dev 검증 결과를 다시 확인한다.
+앱 dev 브랜치는 승인된 소스가 합쳐지는 곳이다. Kubernetes namespace dev와는 별개다.
+Argo CD는 앱 브랜치가 아니라 chargeops-gitops/main의 환경별 경로를 읽는다.
+같은 브랜치 kim_chanju → kim_chanju PR은 만들 수 없다.
 
-**Merge된 최종 코드를 다시 빌드하고 Dev에서 검증한 동일 Digest를 Ops에 승격**한다. kim_chanju 검증 이후 다른 dev 변경과 합쳐진 결과를 검증하기 위한 절차다.
+## 승인과 동일 이미지 검증
 
-## 핵심 파일
+PR 최신 head를 작성자 외 실제 사용자이며 write/maintain/admin 권한을 가진 사람이 승인해야 한다.
+직접 Push, 봇·자기 승인, 변경 전 승인, 수정 요청, 변경된 PR head는 차단한다.
+GitHub API는 merge_commit_sha 계약을 유지하는 2022-11-28 버전으로 고정했다.
+Merge 커밋은 현재 앱 dev HEAD여야 하며, Merge 결과의 apps 디렉터리 Git 트리는
+빌드한 kim_chanju 커밋과 같아야 한다. 여섯 Docker 빌드 컨텍스트가 apps 아래이므로
+다른 dev 변경과 합쳐지며 앱 내용이 달라졌으면 기존 이미지를 승격하지 않고 재빌드·재검증한다.
+Merge 후 이미지를 다시 만들지 않는다. Dev 검증 receipt, 실제 실행 이미지와 성공한 검증 Job UID,
+GitOps 정책 fingerprint, PR 승인을 승격 직전 다시 확인한다. 검증 receipt는 2시간 유효하다.
 
-| 파일 / 경로 | 역할 |
-|---|---|
-| Jenkinsfile | 브랜치별 CI, Dev 검증, PR 생성, Ops 승격, Slack 호출 |
-| scripts/github_cd.py | PR 생성·재사용, 승인 검증, 커밋 상태 등록 |
-| scripts/env_cd.py | Dev Digest 갱신, 통합 검증, 검증 결과에 묶인 Ops 승격 |
-| scripts/canary_cd.py | Ops 선택 Sync, Canary 상태 확인, Abort·GitOps 자동 복구 |
-| scripts/notify_ci.py | 허용된 배포 정보만 Slack으로 전송 |
-| GitOps chargeops-chatops/overlays/development | namespace dev, CSMS 검증용 |
-| GitOps chargeops-chatops/overlays/prod | namespace ops, 운영 Deployment 템플릿 |
-| GitOps chargeops-chatops/overlays/canary | namespace ops, Rollout·Analysis·운영 템플릿 조합 |
+## Jenkins 설정과 적용
 
-예전 overlays/dev는 이름과 달리 Ops 경로다. namespace dev에는 overlays/development를 사용한다. Application 이름만으로 환경을 판단하지 말고 destination.namespace와 source.path를 확인한다.
+1. chargeops-ci: 저장소 chargeops, Branch Specifier `*/kim_chanju`, Script Path `Jenkinsfile`.
+2. 기존 별도 chargeops-ops-ci / chargeops-ci-dev를 Disable한다.
+3. ENABLE_ENVIRONMENT_CD=true, ENABLE_CANARY=true, DEV_DELIVERY_MODE=auto.
+4. DEV_ARGO_APPLICATION=chargeops-dev, OPS_ARGO_APPLICATION=chargeops-chatops-dev.
+5. 새 CSMS 이미지를 확실히 검사할 최초 빌드는 BUILD_ALL_IMAGES=true로 실행한다.
+6. Dev 검증 후 PR을 다른 사람이 승인·Merge한다. 같은 빌드의 대기 단계가 끝나고 Ops로 이어지는지 확인한다.
 
-## 기본 동작
+GitHub dev 보호 규칙의 필수 소스 체크는 chargeops/ci다. PR 준비 단계에서 CI 성공을 먼저 기록하여
+Merge가 최종 Ops 배포 결과를 기다리는 순환 대기를 막는다. chargeops/dev-integration은 CSMS 변경 시 추가 체크다.
+CSMS 미변경 빌드는 CI 후 소스 PR만 만들고 CSMS 배포·승격은 하지 않는다.
 
-- ENABLE_ENVIRONMENT_CD=true, ENABLE_CANARY=true. 운영 승격은 dev 브랜치에서만 실행한다. kim_chanju Job은 Ops를 변경하지 않는다.
-- 이미지 태그는 build-브랜치-빌드번호-커밋12자리다. Jenkins Job 간 번호 충돌을 방지한다. 배포에는 Digest를 사용한다.
-- PUBLISH_DEV_TAG=false. Jenkins가 GitOps Digest를 갱신하므로 Image Updater를 다시 켜지 않는다.
-- RUN_OCPP_FIXTURE_TEST=false. 기존 DB 연결을 유지하며 기본 검증은 읽기만 수행한다. OCPP 쓰기 검증은 별도 승인된 테스트 충전기가 있을 때만 실행한다.
-- Ops Application은 Manual Sync를 유지한다. 승인된 dev 빌드가 CSMS만 선택 Sync를 요청한다.
-- 다른 앱은 이미지 빌드·Push와 소스 PR까지 자동화하며 운영 배포는 별도 작업이다.
-- Registry 조회는 HTTPS와 신뢰된 CA를 사용한다. 별도 CA 경로는 agent의 CHARGEOPS_REGISTRY_CA로 지정한다.
-- Git Push 충돌을 강제로 덮어쓰지 않는다. 미완료 복구 receipt를 임의로 삭제하지 않는다.
-- candidate.json, verification.json, production-delivery.json, source-approval.json, pull-request.json을 Jenkins artifacts에 보관한다. Secret 값은 저장하지 않는다.
-- Canary 완료는 자신의 Sync 식별자, Sync 성공, 목표 이미지, 안정된 Rollout을 함께 확인한다. Deployment csms의 replicas 0은 workloadRef 구조에서 정상이며 실제 네 개 Pod는 Rollout이 관리한다.
+## 환경과 Canary
 
-Slack은 CI 시작·최종 결과, Dev 검증 완료, PR 준비, Ops Canary 시작, 복구 완료·실패를 알린다. Slack 전송 실패는 운영 롤백의 원인으로 취급하지 않는다.
+| 환경 | Argo Application | GitOps 경로 | 반영 방식 |
+|---|---|---|---|
+| dev | chargeops-dev | chargeops-chatops/overlays/development-canary | 자동 Sync |
+| ops | chargeops-chatops-dev | chargeops-chatops/overlays/canary (prod 포함) | 승인 후 Jenkins 선택 Sync |
 
-PR 생성 이후의 리뷰 승인·수정 요청·Merge 없는 종료·Merge 완료는 별도 `Jenkinsfile.pr-notifications` Job이 기존 GitHub/Slack Credential로 1분마다 확인한다. 이 관찰 Job은 배포하지 않는다. 최초 Job 생성 및 테스트는 아래 연결 설정 문서 6절을 따른다.
+Dev·Ops 모두 인프라, Health/DB, WebSocket, OCPP 처리량, 처리 오류율의 5단계 gate를 사용한다.
+HTTP p95는 참고 지표이며 실패 조건에서 제외했다. 세부 기준은 GitOps docs/canary-five-level-gates.md를 따른다.
+Jenkins는 Dev prepare와 Ops promote 직전에 각각 고정 기준 시각을 기록한다.
+이미지 파일과 검증된 기준 시각 필드만 배포 커밋에 허용하며 정책·다른 환경 수정은 차단한다.
+Ops Sync는 CSMS Deployment와 검사 설정·RBAC·수집 리소스만 반영한다. 다른 앱·PVC는 제외한다.
+WorkloadRef 구조에서 원본 Deployment replicas=0은 정상이고 실제 Pod는 Rollout이 관리한다.
 
-실제 적용 순서는 [PR 승인·Slack 연결 설정](pr-approval-slack.md)을 따른다. 로컬 검증이 서버 배포 성공을 의미하지는 않는다.
+실패하면 기존 Abort·이전 Git digest 복원·안정 버전 확인 경로를 사용한다.
+미완료 복구 receipt는 지우지 않는다. 더 새로운 독립 배포가 있으면 덮어쓰지 않는다.
+PUBLISH_DEV_TAG=false를 유지한다. 같은 이미지 필드를 Image Updater와 동시에 관리하지 않는다.
+RUN_OCPP_FIXTURE_TEST 기본값 false는 별도 DB 쓰기 통합 검사 설정이다.
+Dev AnalysisTemplate의 메모리 전용 OCPP fixture 및 자동 dev-vcharger와는 별개다.
 
-코드 변경 없이 CI가 반복되면 [SCM 반복 실행 점검](scm-polling.md)을 따른다. GitOps checkout은 poll=false로 제외하고 앱 저장소의 SCM 감시만 CI 트리거로 유지한다.
+## 최종 확인
+
+Jenkins artifacts의 candidate.json, verification.json, pull-request.json, source-approval.json,
+production-delivery.json으로 커밋·PR·검증 digest·복구 결과를 추적한다.
+Dev/Ops Deployment의 `.spec.template.spec.containers` 이미지가 승인 digest와 같은지,
+Rollout이 Healthy/Completed인지, 해당 배포의 AnalysisRun이 Successful인지 함께 확인한다.
+대시보드 초록 카드만으로 배포 완료를 판단하지 않는다. 선택 시간의 과거 검사도 표시된다.
+로컬 테스트 통과는 실제 Jenkins·Kubernetes 배포 성공을 의미하지 않는다.

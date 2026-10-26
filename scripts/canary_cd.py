@@ -14,6 +14,19 @@ import env_cd as cd
 
 OVERLAY = 'chargeops-chatops/overlays/canary'
 APPLICATION = cd.os.environ.get('OPS_ARGO_APPLICATION', 'chargeops-chatops-dev')
+SYNC_RESOURCES = [
+    {'group': 'apps', 'kind': 'Deployment', 'name': 'csms'},
+    {'group': '', 'kind': 'ConfigMap', 'name': 'csms-canary-probe'},
+    {'group': '', 'kind': 'ConfigMap', 'name': 'csms-ops-service-gate-settings'},
+    {'group': 'argoproj.io', 'kind': 'AnalysisTemplate', 'name': 'csms-availability'},
+    {'group': '', 'kind': 'ServiceAccount', 'name': 'csms-ops-service-gate'},
+    {'group': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': 'csms-ops-service-gate'},
+    {'group': 'rbac.authorization.k8s.io', 'kind': 'RoleBinding', 'name': 'csms-ops-service-gate'},
+    {'group': '', 'kind': 'Service', 'name': 'csms-canary-probe-metrics'},
+    {'group': 'monitoring.coreos.com', 'kind': 'ServiceMonitor', 'name': 'csms-canary-probe'},
+    {'group': 'networking.k8s.io', 'kind': 'NetworkPolicy', 'name': 'csms-canary-probe-metrics'},
+    {'group': 'networking.k8s.io', 'kind': 'NetworkPolicy', 'name': 'csms-ops-service-gate-egress'},
+]
 
 
 def deployment_image():
@@ -84,7 +97,7 @@ def sync(revision):
     operation = {'operation': {'initiatedBy': {'username': marker},
                  'info': [{'name': 'chargeops-operation-id', 'value': marker}],
                  'sync': {'revision': revision, 'prune': False,
-                          'resources': [{'group': 'apps', 'kind': 'Deployment', 'name': 'csms'}]}}}
+                          'resources': SYNC_RESOURCES}}}
     cd.run('kubectl', '-n', 'argocd', 'patch', 'application', APPLICATION, '--type=merge', '-p', json.dumps(operation))
     return marker
 
