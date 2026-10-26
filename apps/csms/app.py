@@ -23,6 +23,7 @@ from prometheus_client import Counter, Gauge, Histogram, start_http_server
 from psycopg_pool import AsyncConnectionPool
 from websockets.asyncio.server import serve
 from csms.http_metrics import HTTPMetricsMiddleware
+from csms.ocpp_metrics import OcppMetrics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("csms")
@@ -55,6 +56,7 @@ g_rated = Gauge("chargeops_charger_rated_current_amperes", "정격 전류", L)
 c_fault = Counter("chargeops_charger_fault_total", "Faulted 진입 횟수", L)
 c_reset = Counter("chargeops_reset_total", "리셋 요청 결과", ["type", "result"])
 c_msg = Counter("chargeops_ocpp_messages_total", "수신 OCPP 메시지", ["action"])
+ocpp_metrics = OcppMetrics()
 # 3파드 시험용 (최종 발표안 7장 1번): 처리 지연 p95 · 접속/끊김 · 파드별 연결 수 · 파드 간 전달
 h_ocpp = Histogram("chargeops_ocpp_handle_seconds", "OCPP 메시지 처리 시간 (받기 → 응답, DB 쓰기 포함)", ["action"],
                    buckets=(.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10))
@@ -90,6 +92,7 @@ class ChargePoint(OcppChargePoint):
         return {"charger_id": self.id, "station_id": state[self.id]["station_id"]}
 
     @on("BootNotification")
+    @ocpp_metrics.observe("BootNotification")
     async def on_boot(self, charge_point_vendor, charge_point_model, **kw):
         c_msg.labels("BootNotification").inc()
         log.info("boot %s (%s %s)", self.id, charge_point_vendor, charge_point_model)
@@ -97,6 +100,7 @@ class ChargePoint(OcppChargePoint):
                                             interval=HEARTBEAT, status="Accepted")
 
     @on("Heartbeat")
+    @ocpp_metrics.observe("Heartbeat")
     async def on_heartbeat(self, **kw):
         c_msg.labels("Heartbeat").inc()
         with h_ocpp.labels("Heartbeat").time():
@@ -105,6 +109,7 @@ class ChargePoint(OcppChargePoint):
         return call_result.Heartbeat(current_time=now().isoformat())
 
     @on("StatusNotification")
+    @ocpp_metrics.observe("StatusNotification")
     async def on_status(self, connector_id, error_code, status, timestamp=None, **kw):
         c_msg.labels("StatusNotification").inc()
         with h_ocpp.labels("StatusNotification").time():
@@ -112,6 +117,7 @@ class ChargePoint(OcppChargePoint):
         return call_result.StatusNotification()
 
     @on("MeterValues")
+    @ocpp_metrics.observe("MeterValues")
     async def on_meter(self, connector_id, meter_value, **kw):
         c_msg.labels("MeterValues").inc()
         with h_ocpp.labels("MeterValues").time():
