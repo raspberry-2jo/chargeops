@@ -4,8 +4,10 @@
 - 에스컬레이션        : 무응답 시 상위 역할 재호출
 - POST /watchdog     : Alertmanager Watchdog 수신 → 5분 끊기면 P-05(알림 경로 장애)
 - POST /report/daily : 일일 리포트 (SEV4 · WATCH · 가동률 · 품질 점수)
+- 장애 정리(reconcile): 해소 알림을 놓친 장애를 1분마다 Alertmanager 현재 경보와 맞춰 보고 자동으로 닫음
 """
 import json, logging, os, smtplib, threading, time, uuid
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
 import requests
@@ -25,12 +27,17 @@ SMTP_HOST, SMTP_PORT = os.environ.get("SMTP_HOST", "10.10.40.10"), int(os.enviro
 MAIL_TO = os.environ.get("MAIL_TO", "ops@chargeops.lab")
 CSMS, CSMS_TOKEN = os.environ.get("CSMS_URL", "http://csms:8000"), os.environ.get("CSMS_API_TOKEN", "")
 AI = os.environ.get("AI_URL", "http://ai-gateway:8000")
+AM = os.environ.get("ALERTMANAGER_URL", "http://10.10.20.203:9093")     # 장애 정리용 (현재 경보 조회)
+RECONCILE_GRACE = int(os.environ.get("RECONCILE_GRACE_SEC", "300"))     # 이만큼 계속 안 울려야 닫음
+RECONCILE_EVERY = int(os.environ.get("RECONCILE_EVERY_SEC", "60"))      # 정리 주기
+KST = timezone(timedelta(hours=9))                                     # 한국은 서머타임이 없어 고정 +09:00 (tzdata 없는 이미지 대비)
 
 # 등급별 채널 (문서 2.4 알림 채널 표)
 ROUTE = {"SEV1": {"slack", "discord", "mail"}, "SEV2": {"slack", "mail"},
          "SEV3": {"slack"}, "SEV4": set()}
 ESCALATE_MIN = {"SEV1": 5, "SEV2": 15, "SEV3": 15}
-state = {"slack_fail": 0, "last_watchdog": time.time(), "p05_sent": False}
+state = {"slack_fail": 0, "last_watchdog": time.time(), "p05_sent": False, "last_reconcile": 0.0}
+_missing: dict[int, float] = {}   # incident_id -> 경보가 처음 안 울린 것을 본 시각 (장애 정리용)
 app = FastAPI(title="ChargeOps notifier")
 
 
@@ -245,6 +252,52 @@ def escalate():
                 send_discord(inc["incident_id"], f"⏰ SEV1 무응답 재발송: {inc['title']}")
 
 
+def reconcile():
+    """해소 알림을 놓친 장애 정리 (재시작 · 알림 유실 · fingerprint 불일치 대비)
+    같은 code(+충전소)로 울리는 경보가 RECONCILE_GRACE 동안 없으면 닫는다.
+    A-01(이상 탐지) · C-05(장기 방치)는 DB 가 판단하는 장애라 제외. Alertmanager 조회 실패 시 아무것도 안 닫음"""
+    try:
+        alerts = requests.get(f"{AM}/api/v2/alerts", params={"active": "true"}, timeout=5).json()
+    except Exception as e:
+        log.warning("reconcile skip (alertmanager): %s", e)
+        return
+    firing = {(a["labels"].get("code"), a["labels"].get("station_id")) for a in alerts}
+    codes = {c for c, _ in firing}
+    rows = q("""SELECT incident_id, type_code, station_id, detected_at, slack_thread_ts FROM incident
+                WHERE status <> 'resolved' AND type_code NOT IN ('A-01', 'C-05')""")
+    open_ids = {r["incident_id"] for r in rows}
+    for iid in list(_missing):                    # 그사이 다른 경로로 닫힌 장애는 기록에서 뺌
+        if iid not in open_ids:
+            _missing.pop(iid, None)
+    now = time.time()
+    for r in rows:
+        iid = r["incident_id"]
+        still = (r["type_code"], r["station_id"]) in firing if r["station_id"] else r["type_code"] in codes
+        if still:
+            _missing.pop(iid, None)
+            continue
+        first = _missing.setdefault(iid, now)
+        if now - first < RECONCILE_GRACE:
+            continue
+        first = max(first, r["detected_at"].timestamp())
+        done = q("""UPDATE incident SET status = 'resolved', resolved_at = to_timestamp(%s),
+                        root_cause = coalesce(root_cause, '') || ' / auto-resolved: alert cleared, resolve notice missed'
+                    WHERE incident_id = %s AND status <> 'resolved' RETURNING incident_id""", (first, iid))
+        _missing.pop(iid, None)
+        if not done:                              # 그사이 해소 알림 · 다른 파드가 먼저 닫음 → 메시지 중복 방지
+            continue
+        log.info("reconcile: incident %s auto-resolved", iid)
+        if r["slack_thread_ts"]:
+            mins = round((first - r["detected_at"].timestamp()) / 60, 1)
+            since = datetime.fromtimestamp(first, KST).strftime("%H:%M")
+            send_slack(iid,
+                       f"✅ 복구 확인 (자동 정리) — 소요 {mins}분\n"
+                       f"{since}부터 이 장애의 경보가 {RECONCILE_GRACE // 60}분 넘게 꺼져 있어 장애를 닫았습니다.\n"
+                       "재시작 등으로 해소 알림이 오지 않아, notifier가 현재 경보 상태를 직접 확인해 정리한 것입니다. "
+                       "같은 문제가 다시 생기면 새 스레드로 알립니다.",
+                       thread_ts=r["slack_thread_ts"])
+
+
 def loop():
     while True:
         for fn in (poll_anomaly, escalate):
@@ -252,6 +305,12 @@ def loop():
                 fn()
             except Exception as e:
                 log.error("%s: %s", fn.__name__, e)
+        if time.time() - state["last_reconcile"] >= RECONCILE_EVERY:   # 장애 정리는 1분마다
+            state["last_reconcile"] = time.time()
+            try:
+                reconcile()
+            except Exception as e:
+                log.error("reconcile: %s", e)
         if time.time() - state["last_watchdog"] > 300:   # Watchdog 5분 미수신 → 알림 경로 이상
             alert_path_down("Alertmanager Watchdog 5분 미수신")
         time.sleep(10)
