@@ -57,6 +57,12 @@ pipeline {
       description: 'Existing Argo CD Application targeting namespace dev and the selected Dev overlay.')
     string(name: 'OPS_ARGO_APPLICATION', defaultValue: 'chargeops-chatops-dev',
       description: 'Existing manual Argo CD Application targeting namespace ops and overlays/canary.')
+    booleanParam(name: 'ECR_MIRROR', defaultValue: true,
+      description: 'Also push published images to AWS ECR (copy only; deployment still uses REGISTRY).')
+    string(name: 'ECR_CREDENTIAL_ID', defaultValue: 'chargeops-ecr-push',
+      description: 'Username/password: AWS access key ID / secret access key (ECR push only).')
+    string(name: 'ECR_REGISTRY_CREDENTIAL_ID', defaultValue: 'chargeops-ecr-registry',
+      description: 'Secret text: <account>.dkr.ecr.ap-northeast-2.amazonaws.com/chargeops')
   }
   environment {
     REGISTRY = 'registry.chargeops.lab:5000/chargeops'
@@ -230,6 +236,30 @@ pipeline {
             fi
           fi
         '''
+      }
+    }
+    stage('ECR mirror push') {
+      when { expression { params.ECR_MIRROR && env.PUBLISH_IMAGES == 'true' && env.BUILD_IMAGES?.trim() } }
+      steps {
+        catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+          withCredentials([
+            usernamePassword(credentialsId: params.ECR_CREDENTIAL_ID.trim(),
+              usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY'),
+            string(credentialsId: params.ECR_REGISTRY_CREDENTIAL_ID.trim(), variable: 'ECR_REGISTRY')
+          ]) {
+            sh '''
+              set -eu
+              export AWS_DEFAULT_REGION=ap-northeast-2
+              ECR_HOST="${ECR_REGISTRY%%/*}"
+              trap 'docker logout "$ECR_HOST" >/dev/null 2>&1 || true' EXIT
+              aws ecr get-login-password | docker login --username AWS --password-stdin "$ECR_HOST"
+              for NAME in $BUILD_IMAGES; do
+                docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$ECR_REGISTRY/$NAME:$IMAGE_TAG"
+                docker push "$ECR_REGISTRY/$NAME:$IMAGE_TAG"
+              done
+            '''
+          }
+        }
       }
     }
     stage('Development delivery and integration test') {
