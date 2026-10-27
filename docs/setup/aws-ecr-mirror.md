@@ -1,7 +1,7 @@
 # AWS ECR 이미지 미러 설치 기록 (Jenkins → ECR)
 
 - 담당: 황채연 (AWS) · Jenkinsfile 적용은 김찬주 (CI/CD)
-- 관련 WBS: <WBS 번호>
+- 관련 WBS:  없음 (AWS 추가 작업 · ECR 이미지 미러)
 - 버전: versions.md 참고 (mgmt-agent AWS CLI v2.38.x)
 - 상태: **2026-10-27 빌드 #59에서 이미지 6개 ECR 업로드 확인** (Jenkinsfile `ECR mirror push` 단계, PR #62)
 - 관련: [`aws-s3-backup.md`](aws-s3-backup.md) (DB 백업도 같은 방식: 사내 repo1 + AWS repo2)
