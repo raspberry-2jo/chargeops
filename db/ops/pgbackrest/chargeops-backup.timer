@@ -1,0 +1,11 @@
+# /etc/systemd/system/chargeops-backup.timer — 매일 03:40 (공공 기본정보 수집 03:10 뒤)
+#   Persistent=true: 그 시각에 꺼져 있었으면 다음에 켰을 때 한 번 따라잡는다
+[Unit]
+Description=ChargeOps pgBackRest daily backup
+
+[Timer]
+OnCalendar=*-*-* 03:40:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

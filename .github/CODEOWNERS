@@ -5,28 +5,33 @@
 # - 아래에 있는 줄일수록 우선순위가 높음
 # - 사람 대신 팀으로 적는 이유: 담당자가 1명이면 그 사람이 올린 PR은
 #   담당 승인을 해줄 사람이 없어서 머지가 막힘
-# - <조직명>을 실제 Organization 이름으로 바꿔서 올릴 것
 # ==============================================
 
 # 기본값: 나머지 전부
-*                           @<조직명>/infra-team @<조직명>/data-team
+*                           @raspberry-2jo/infra-team @raspberry-2jo/data-team
 
 # ----- 인프라 -----
-/apps/csms/                 @<조직명>/infra-team
-/apps/virtual-charger/      @<조직명>/infra-team
-/apps/alert-router/         @<조직명>/infra-team
-/edge/                      @<조직명>/infra-team
-/infra/                     @<조직명>/infra-team
-/deploy/                    @<조직명>/infra-team
-/monitoring/                @<조직명>/infra-team
-/Jenkinsfile                @<조직명>/infra-team
+/apps/csms/                 @raspberry-2jo/infra-team
+/apps/virtual-charger/      @raspberry-2jo/infra-team
+/apps/alert-router/         @raspberry-2jo/infra-team
+/edge/                      @raspberry-2jo/infra-team
+/infra/                     @raspberry-2jo/infra-team
+/deploy/                    @raspberry-2jo/infra-team
+/monitoring/                @raspberry-2jo/infra-team
+/Jenkinsfile                @raspberry-2jo/infra-team
+/scripts/ci.py              @raspberry-2jo/infra-team
 
 # ----- 데이터 -----
-/apps/collector/            @<조직명>/data-team
-/apps/chatops-bot/          @<조직명>/data-team
-/apps/ai-gateway/           @<조직명>/data-team
-/db/                        @<조직명>/data-team
+/apps/collector/            @raspberry-2jo/data-team
+/apps/chatops-bot/          @raspberry-2jo/data-team
+/apps/ai-gateway/           @raspberry-2jo/data-team
+/apps/notifier/             @raspberry-2jo/data-team
+/apps/common/               @raspberry-2jo/infra-team @raspberry-2jo/data-team
+/requirements-dev.txt       @raspberry-2jo/infra-team @raspberry-2jo/data-team
+/pytest.ini                 @raspberry-2jo/infra-team @raspberry-2jo/data-team
+/tests/                     @raspberry-2jo/infra-team @raspberry-2jo/data-team
+/db/                        @raspberry-2jo/data-team
 
 # ----- 깃 규칙 파일 (양 팀 모두 확인) -----
-/.github/                   @<조직명>/infra-team @<조직명>/data-team
-/README.md                  @<조직명>/infra-team @<조직명>/data-team
+/.github/                   @raspberry-2jo/infra-team @raspberry-2jo/data-team
+/README.md                  @raspberry-2jo/infra-team @raspberry-2jo/data-team

@@ -1,0 +1,87 @@
+# db/migrations — DDL (WBS 1.4 · 2.6)
+
+운영 DB(PostgreSQL 17)의 테이블 · 코드 · 적재 함수 · 계정을 **순서대로 쌓는 SQL**입니다.
+표 하나하나의 뜻은 [`docs/db/table-definitions.md`](../../docs/db/table-definitions.md), 그림은 [`docs/db/erd/`](../../docs/db/erd/)에 있습니다.
+
+## 파일 (이름 순서 = 적용 순서)
+
+| 파일 | 내용 | 실습 스키마 v1.1 |
+|---|---|---|
+| `V20261013113000__core_tables.sql` | 코드표 · 운영기관 · 충전소 · 충전기 · 현재 상태 · 상태 이력(월 파티션) · 수집 기록 · 적재 대기 | `01_tables.sql` |
+| `V20261013113100__load_functions.sql` | 적재 대기(`stg_*`) → 본 테이블 적재 함수. `apps/collector`가 부름 | `02_load_functions.sql` |
+| `V20261013113200__seed_codes.sql` | 공공 API 활용가이드 공통 코드 (기준 데이터) | `03_seed_codes.sql` |
+| `V20261013113300__arch_codes.sql` | 공공 API 상태 코드 ↔ OCPP 상태 대응, 고장 코드, `is_down` | `10_arch_codes.sql` |
+| `V20261013113400__arch_tables.sql` | 계측 · 장애 · 감사 · 승인 · 권한 · 알림 · AI · 이상치 · 품질 · 통계 테이블, 파티션 함수 | `11_arch_tables.sql` |
+| `V20261013113500__roles_and_grants.sql` | 계정 6개와 최소 권한, 감사 기록 추가만 허용 트리거. **비밀번호 없음** | `14_security.sql` |
+| `V20261014160000__ops_ui_columns.sql` | 장애에 담당 · 원인 코드 · 한 줄 상황 · Slack 링크 칸, Slack 이름표 `slack_user` | `17_ops_ui.sql` ① ② |
+| `../views/V20261014160100__stats_uptime.sql` | 통계 대상 · 상태 구간 · **일 가동률(구체화 뷰)** · MTTR · 운영기관 일/주/월 통계 · 장기 방치(C-05). report_ro 권한 | `12_stats.sql` |
+| `../views/V20261014160200__anomaly_score.sql` | 이상 징후 점수 뷰 · 감지 함수(SECURITY DEFINER) · 주간 검토. 실행 권한 | `13_anomaly_dq.sql` 앞부분 |
+| `../quality/V20261014160300__dq_check.sql` | 데이터 품질 점검 6항목 → `dq_result`. 실행 권한 | `13_anomaly_dq.sql` 90줄부터 |
+| `../views/V20261014160400__ops_views.sql` | Grafana 관제 화면 · 알림용 조회 뷰 6개(조치 필요 · 조치 기록 · 장애 · 알림 · 충전기 카드 · 역할) | `17_ops_ui.sql` ④ |
+| `V20261014160500__cron_jobs.sql` | pg_cron 상시 작업 6개 (가동률 10분 · 일 통계 · 파티션 · 장기 방치 · 기록 정리 · 상위 표 통계 03:30) | `15_cron.sql` |
+| `V20261020103000__csms_session.sql` | CSMS 다중 파드 대응: 충전기별 현재 세션 `charger_session` · 상태 기록 `fn_record_status`(DB 현재 상태와 다를 때만) · 세션 열기/닫기(최신 세션만 통신이상 기록). app_writer 실행 권한 | `18_csms_session.sql` |
+| `V20261022130000__ai_embedding_1024.sql` | 장애 임베딩 `incident_embedding.embedding` 768 → 1024 (bge-m3, 런북 검색과 같은 모델). 빈 표일 때만. AI 게이트웨이 · RAG 용 DB · 계정은 V 체인 밖 [`db/ops/ai/`](../ops/ai/) | - |
+
+세 폴더(`db/migrations` · `db/views` · `db/quality`)의 V 파일을 **파일 이름 순서로 섞어서** 적용합니다 (Flyway 의 여러 위치와 같은 방식). 실습 충전기 등록은 V 체인 밖 `db/seed/lab_chargers.sql` — 실습 · 시연 DB 에만 손으로.
+
+## 규칙
+
+- 이름은 `V날짜시간__설명.sql` (README K5). 번호(`V003`)로 지으면 두 사람이 같은 번호를 만듭니다.
+- **이미 적용한 파일은 고치지 않습니다.** 바꿀 것이 생기면 새 파일(`ALTER …`)을 더합니다.
+- 공용 폴더라 시작 전에 Slack에 알리고, 그 변경만 작은 PR로 올립니다 (K3).
+- 파일 안에 비밀번호 · 키를 쓰지 않습니다 (S1 · S6).
+- psql 전용 명령(`\echo`, `\set` 등)을 쓰지 않아서, psql이든 마이그레이션 도구든 그대로 실행됩니다.
+
+## 적용 (빈 DB에 한 번)
+
+Primary DB 서버에서 **postgres**(테이블 소유자) 권한으로 실행합니다.
+
+```bash
+# ===== 실행할 명령어 =====
+sudo -u postgres createdb chargeops
+for f in $(ls db/migrations/V*.sql db/views/V*.sql db/quality/V*.sql | sort -t/ -k3); do echo "== $f"; sudo -u postgres psql -X -q -d chargeops -v ON_ERROR_STOP=1 < "$f" || break; done
+sudo -u postgres psql -d chargeops -Atc "SELECT count(*) FROM pg_tables WHERE schemaname = 'public' AND tablename NOT LIKE '%\_20%' AND tablename NOT LIKE '%default'"
+```
+
+```
+# ===== 실행 결과 =====
+== db/migrations/V20261013113000__core_tables.sql
+…
+28
+```
+
+- 파일을 표준입력(`<`)으로 넘겨서, postgres 계정이 내 홈 폴더를 읽을 권한이 없어도 됩니다.
+- 마지막 숫자 28 = 테이블 수입니다 (월 파티션 · default 파티션 제외. `slack_user` 가 더해져 27 → 28).
+- 전제: `pg_cron` 은 `shared_preload_libraries` 와 `cron.database_name` 에 있어야 합니다 (`db/ops/postgresql/chargeops.conf` 에 이미 있음).
+- ⚠ 이미 운영 중인 DB(각자 PC)에는 다시 적용하지 않습니다 — `V…160100` 의 `DROP MATERIALIZED VIEW … CASCADE` 가 관제 화면 뷰까지 지웁니다. 새로 세울 때만.
+- K8s 없이 DB 만으로 돌릴 때만(시뮬레이션) 이상치 · 품질 잡을 DB 예약 작업으로:
+
+```sql
+SELECT cron.schedule($$sim-anomaly$$,  $$* * * * *$$,  $$SELECT fn_detect_anomaly()$$);
+SELECT cron.schedule($$sim-dq-daily$$, $$40 0 * * *$$, $$SELECT fn_dq_check()$$);
+```
+
+## 비밀번호 설정 (적용한 뒤 사람이 직접)
+
+역할은 만들어지지만 비밀번호가 없어서 아직 접속할 수 없습니다. 값은 저장소 · 명령 줄 · 셸 기록에 남기지 않습니다.
+
+```bash
+# ===== 실행할 명령어 =====
+sudo -u postgres psql -d chargeops
+```
+
+```sql
+-- psql 안에서 역할마다 (입력이 화면에 보이지 않고, SCRAM 해시로 저장됨)
+\password app_writer
+\password app_reader
+\password report_ro
+\password dba
+\password replicator
+\password postgres_exporter
+```
+
+앱 · 도구 쪽은 각자 `.env`(루트 `.env.example` 양식)나 `~/.pgpass`(권한 600)에 넣습니다.
+
+## 팀에서 정한 뒤 새 파일로 바꿀 것
+
+결정 ① 이력 보관 범위 · 같은 상태 반복 적재, ② 10분 갱신 지역(`stat_scope`, 지금 제주 `50`), ③ 고장 정의(`code_status.is_down`), ④ MTTR 두 지표, ⑦ 임베딩 차원(`incident_embedding`, 지금 768), WBS 1.5 권한 매트릭스(`ops_role`). 자세한 내용은 테이블 정의서 0장.

@@ -5,9 +5,14 @@
 | 구분 | 항목 | 버전 | 담당 | 확정일 |
 |---|---|---|---|---|
 | OS | Rocky Linux | 미정 | | |
-| DB | PostgreSQL | 미정 | | |
-| DB | PgBouncer | 미정 | | |
-| DB | pgBackRest | 미정 | | |
+| DB | PostgreSQL | 17.x (실습 17.11) | 강영수 | 2026-10-13 |
+| DB | PgBouncer | 1.26.x (실습 1.26.0) | 강영수 | 2026-10-13 |
+| DB | pgBackRest | 2.59.x (실습 2.59.3) | 강영수 | 2026-10-13 |
+| DB | pgvector | 0.8.x (실습 0.8.7) | 강영수 | 2026-10-13 |
+| DB | pg_cron | 1.6.x (실습 1.6.8) | 강영수 | 2026-10-13 |
+| DB | pgaudit | 17.x (실습 17.1) | 강영수 | 2026-10-13 |
+| DB | Patroni (자동 장애 전환) | 4.1.x (PGDG 패키지, 시험 4.1.5) | 강영수 | 2026-10-16 |
+| DB | etcd (Patroni 합의 저장소) | 3.5.17 (GitHub 배포판, SHA256 검증) | 강영수 | 2026-10-16 |
 | 언어 | Python | 미정 | | |
 | 컨테이너 | Kubernetes | 미정 | | |
 | 컨테이너 | Helm | 미정 | | |
@@ -17,7 +22,8 @@
 | CI/CD | Jenkins | 미정 | | |
 | IaC | Vagrant | 미정 | | |
 | IaC | Ansible | 미정 | | |
-| IaC | Terraform | 미정 | | |
+| IaC | Terraform | 1.16.x (DR 실습 1.16.6 — 인프라 확정 전 제안) | 강영수 | 2026-10-15 |
+| IaC | Terraform AWS provider | 6.x (DR 실습 6.69.0) · archive 2.x (2.8.1) | 강영수 | 2026-10-15 |
 | 엣지 | WireGuard | 미정 | | |
 | 엣지 | PlatformIO (ESP32) | 미정 | | |
 

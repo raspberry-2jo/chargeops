@@ -1,0 +1,227 @@
+# ============================================================================
+# DB 자동 장애 전환 설치 — Patroni + etcd + watchdog  (mgmt 의 ~/chargeops/ansible 에서)
+#   ansible-playbook patroni.yml                 → 설치 · 설정만. 운영 DB 는 그대로 postgresql-17 로 돈다
+#   전환(운영 DB 를 Patroni 가 넘겨받기)은 사람이 확인하며:  bash ~/chargeops/db/ops/patroni/convert.sh
+#   태그: etcd(db-01 · db-02 · mgmt) · watchdog(db) · patroni(db)        절차 · 이유: docs/setup/postgres-patroni.md
+#
+#   비밀번호는 이 저장소에 없다. mgmt 의 ~/.pgpass 에서 읽어 DB 서버의 /etc/patroni/patroni.yml(600, postgres)에만 쓴다
+#   방화벽(2379 · 2380 · 8008)은 group_vars/db.yml · mgmt.yml 의 fw_rules → site.yml --tags firewall (after-up 이 매번 적용)
+# ============================================================================
+
+- name: 1. etcd — Patroni 가 'Leader 가 누구인지' 를 적는 합의 저장소 (3대, 1대 장애까지 견딤)
+  hosts: db:mgmt                   # = group_vars/all/main.yml 의 ha.etcd_members
+  become: true
+  tags: [etcd]
+  vars:
+    etcd_ver: "{{ versions.etcd }}"
+    etcd_url: "https://github.com/etcd-io/etcd/releases/download/v{{ versions.etcd }}"
+    etcd_cluster: "{% for h in ha.etcd_members %}{{ h }}=http://{{ hostvars[h].ansible_host }}:2380{{ ',' if not loop.last }}{% endfor %}"
+  tasks:
+    - name: 방화벽에 etcd 포트(2379 · 2380)가 열려 있는지 — 없으면 site.yml --tags firewall 먼저 (구성원끼리 못 붙어 멈춤)
+      ansible.builtin.shell: firewall-cmd --zone=chargeops --list-rich-rules | grep -c 'port="2380"'
+      register: fw2380
+      changed_when: false
+      failed_when: fw2380.stdout | int < 1
+
+    - name: 배포판 내려받기 (SHA256SUMS 로 검증)
+      ansible.builtin.get_url:
+        url: "{{ etcd_url }}/etcd-v{{ etcd_ver }}-linux-amd64.tar.gz"
+        dest: "/tmp/etcd-v{{ etcd_ver }}.tar.gz"
+        checksum: "sha256:{{ etcd_url }}/SHA256SUMS"
+        mode: "0644"
+
+    - name: etcd · etcdctl · etcdutl 을 /usr/local/bin 에
+      ansible.builtin.shell: |
+        tar -xzf /tmp/etcd-v{{ etcd_ver }}.tar.gz -C /tmp
+        install -m 0755 /tmp/etcd-v{{ etcd_ver }}-linux-amd64/etcd /tmp/etcd-v{{ etcd_ver }}-linux-amd64/etcdctl \
+                        /tmp/etcd-v{{ etcd_ver }}-linux-amd64/etcdutl /usr/local/bin/
+        rm -rf /tmp/etcd-v{{ etcd_ver }}-linux-amd64
+        touch /usr/local/bin/.etcd-v{{ etcd_ver }}
+      args:
+        creates: /usr/local/bin/.etcd-v{{ etcd_ver }}     # versions.etcd 를 바꾸면 새로 깔고 한 대씩 재시작(아래 handler)
+      notify: etcd 재시작
+
+    - name: etcd 계정
+      ansible.builtin.user: { name: etcd, system: true, shell: /sbin/nologin, create_home: false }
+
+    - name: 데이터 폴더 (/var/lib/etcd, etcd 만)
+      ansible.builtin.file: { path: /var/lib/etcd, state: directory, owner: etcd, group: etcd, mode: "0700" }
+
+    - name: 설정 폴더 (/etc/etcd)
+      ansible.builtin.file: { path: /etc/etcd, state: directory, mode: "0755" }
+
+    - name: 설정 (/etc/etcd/etcd.conf) — 실습망 IP 로만 받음. TLS 는 안 씀(데이터망 안, 방화벽으로 제한 — 문서 10장 한계)
+      ansible.builtin.copy:
+        dest: /etc/etcd/etcd.conf
+        mode: "0644"
+        content: |
+          ETCD_NAME={{ inventory_hostname }}
+          ETCD_DATA_DIR=/var/lib/etcd
+          ETCD_LISTEN_PEER_URLS=http://{{ ansible_host }}:2380
+          ETCD_LISTEN_CLIENT_URLS=http://{{ ansible_host }}:2379,http://127.0.0.1:2379
+          ETCD_INITIAL_ADVERTISE_PEER_URLS=http://{{ ansible_host }}:2380
+          ETCD_ADVERTISE_CLIENT_URLS=http://{{ ansible_host }}:2379
+          ETCD_INITIAL_CLUSTER={{ etcd_cluster }}
+          ETCD_INITIAL_CLUSTER_TOKEN={{ ha.scope }}-etcd
+          ETCD_INITIAL_CLUSTER_STATE=new
+          ETCD_ENABLE_V2=false
+      notify: etcd 재시작
+
+    - name: systemd 서비스 (etcd.service)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/etcd.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=etcd — ChargeOps Patroni DCS
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=notify
+          User=etcd
+          EnvironmentFile=/etc/etcd/etcd.conf
+          ExecStart=/usr/local/bin/etcd
+          Restart=always
+          RestartSec=5
+          LimitNOFILE=65536
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: etcd 재시작
+
+    - name: 시작 + 부팅 때 자동 시작 (3대가 거의 동시에 떠야 첫 구성이 끝남 → 이 작업은 3대에 동시에 돈다)
+      ansible.builtin.systemd: { name: etcd, state: started, enabled: true, daemon_reload: true }
+
+  handlers:
+    - name: etcd 재시작
+      # 한 대씩 — 3대를 한꺼번에 재시작하면 과반이 사라져 Leader 가 스스로 읽기 전용이 된다 (retry_timeout 10초).
+      #   Patroni 로 전환한 뒤 etcd 설정을 바꿀 때는 먼저 patronictl pause (문서 7장)
+      ansible.builtin.systemd: { name: etcd, state: restarted, daemon_reload: true }
+      throttle: 1
+
+- name: 1-1. etcd 확인 (3대 모두 healthy)
+  hosts: db-01
+  become: true
+  tags: [etcd]
+  tasks:
+    - name: endpoint health --cluster (결과가 stderr 로 나와서 2>&1)
+      ansible.builtin.shell: /usr/local/bin/etcdctl --endpoints=http://{{ ansible_host }}:2379 endpoint health --cluster 2>&1
+      register: eh
+      retries: 6
+      delay: 5
+      until: eh.rc == 0 and (eh.stdout_lines | select('search', 'is healthy') | list | length) == (ha.etcd_members | length)
+      changed_when: false
+
+    - name: 결과
+      ansible.builtin.debug: { var: eh.stdout_lines }
+
+- name: 2. watchdog — Patroni 가 멈추면 이 서버를 재부팅해 'Primary 두 대' 를 막는 장치
+  hosts: db
+  become: true
+  tags: [watchdog]
+  tasks:
+    - name: softdog(소프트웨어 watchdog) 을 부팅 때마다 올림 — 실서버는 하드웨어 watchdog(iTCO 등)이 있으면 그것
+      ansible.builtin.copy: { dest: /etc/modules-load.d/softdog.conf, content: "softdog\n", mode: "0644" }
+
+    - name: /dev/watchdog 을 postgres 가 열 수 있게 (Patroni 는 postgres 계정으로 돈다)
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/61-watchdog.rules
+        mode: "0644"
+        content: 'KERNEL=="watchdog", OWNER="postgres", GROUP="postgres", MODE="0600"'
+
+    - name: 지금 올리기 + 권한 (재부팅 전에도 바로 쓰게)
+      ansible.builtin.shell: |
+        modprobe softdog
+        udevadm control --reload-rules
+        chown postgres:postgres /dev/watchdog && chmod 0600 /dev/watchdog
+        stat -c '%U %a' /dev/watchdog
+      register: wd
+      changed_when: false
+
+    - name: 확인 (postgres 600 이어야 함)
+      ansible.builtin.assert: { that: ["wd.stdout == 'postgres 600'"], fail_msg: "/dev/watchdog: {{ wd.stdout }}", quiet: true }
+
+- name: 3. Patroni — 설치 · 설정만 (시작은 convert.sh 가 사람의 확인을 받으며)
+  hosts: db
+  become: true
+  tags: [patroni]
+  vars:
+    # 비밀번호: mgmt(이 playbook 을 돌리는 곳)의 ~/.pgpass 에서 읽는다 — lookup 은 늘 mgmt 에서 돈다. 화면 · 로그에 내지 않음
+    pgpass_lines: "{{ lookup('ansible.builtin.file', lookup('ansible.builtin.env', 'HOME') + '/.pgpass').splitlines() }}"
+    pg_super_pw: "{{ pgpass_lines | select('match', '^[^:]*:5432:[^:]*:postgres:') | first | default('') | regex_replace('^([^:]*:){4}', '') }}"
+    pg_repl_pw: "{{ pgpass_lines | select('match', '^[^:]*:5432:replication:replicator:') | first | default('') | regex_replace('^([^:]*:){4}', '') }}"
+    etcd_hosts: "{% for h in ha.etcd_members %}{{ hostvars[h].ansible_host }}:2379{{ ',' if not loop.last }}{% endfor %}"
+  tasks:
+    - name: ~/.pgpass 에 postgres · replicator 줄이 있는지 (없으면 docs/setup/postgres-failover.md 2장)
+      ansible.builtin.assert:
+        that: [pg_super_pw | length > 0, pg_repl_pw | length > 0]
+        fail_msg: "mgmt 의 ~/.pgpass 에 'db-0X:5432:*:postgres:…' · 'db-0X:5432:replication:replicator:…' 줄이 있어야 함"
+        quiet: true
+      run_once: true
+      no_log: true
+
+    - name: 패키지 (PGDG 저장소 — PostgreSQL 17 을 깐 저장소)
+      ansible.builtin.dnf: { name: [patroni, patroni-etcd], state: present }
+
+    - name: 설정 폴더
+      ansible.builtin.file: { path: /etc/patroni, state: directory, owner: root, group: postgres, mode: "0750" }
+
+    - name: 설정 (/etc/patroni/patroni.yml, 600 postgres — 비밀번호가 들어 있다)
+      ansible.builtin.template:
+        src: templates/patroni.yml.j2
+        dest: /etc/patroni/patroni.yml
+        owner: postgres
+        group: postgres
+        mode: "0600"
+      no_log: true
+      notify: Patroni 설정 다시 읽기
+
+    - name: PgBouncer 를 PostgreSQL 상태에 맞추는 콜백 (내려가면 stop, 역할이 정해진 뒤 restart — 2026-10-12 · 10-16 실측)
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/patroni-on-role-change.sh
+        mode: "0755"
+        src: "{{ playbook_dir }}/../db/ops/patroni/patroni-on-role-change.sh"
+
+    - name: postgres 계정이 PgBouncer restart · stop · start 만 sudo 로 (다른 명령은 안 됨)
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/patroni-pgbouncer
+        mode: "0440"
+        content: "postgres ALL=(root) NOPASSWD: /usr/bin/systemctl restart pgbouncer, /usr/bin/systemctl stop pgbouncer, /usr/bin/systemctl start pgbouncer\n"
+        validate: visudo -cf %s
+
+    - name: systemd 서비스 (패키지 것 대신 이 파일 — 설정 경로 · reload · 재시작 정책을 고정)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/patroni.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Patroni — PostgreSQL 17 자동 장애 전환 (ChargeOps)
+          After=network-online.target etcd.service
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=postgres
+          Group=postgres
+          ExecStart=/usr/bin/patroni /etc/patroni/patroni.yml
+          ExecReload=/bin/kill -s HUP $MAINPID
+          # Patroni 만 멈추고 PostgreSQL 은 남긴다 (정상 종료 때는 Patroni 가 PostgreSQL 을 직접 내림)
+          KillMode=process
+          # 정상 종료가 길어져도(WAL 보관 밀림 등) 강제 종료하지 않게 넉넉히 — 강제 종료되면 watchdog 이 켜진 채라 재부팅된다.
+          #   Patroni 는 PostgreSQL 이 새 접속을 막는 시점(safepoint)에 watchdog 을 먼저 정상 해제한다
+          TimeoutSec=300
+          # Patroni 가 죽으면 5초 뒤 다시 띄움 — Replica 에서 감시가 조용히 사라지는 것을 막음.
+          #   Leader 에서 Patroni 가 '멈춘'(hang) 경우는 재시작이 안 되므로 watchdog 이 25초 뒤 재부팅 (drill.sh MODE=freeze-patroni)
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: daemon-reload (시작 · 자동 시작은 convert.sh 에서)
+      ansible.builtin.systemd: { daemon_reload: true }
+
+  handlers:
+    - name: Patroni 설정 다시 읽기
+      ansible.builtin.shell: systemctl is-active --quiet patroni && systemctl reload patroni || true

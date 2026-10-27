@@ -1,0 +1,12 @@
+# /etc/systemd/system/chargeops-backup.service — pgBackRest 정기 백업 1회 (타이머가 부름, 손으로: systemctl start)
+[Unit]
+Description=ChargeOps pgBackRest scheduled backup (Primary only)
+# Patroni 로 전환했으면 patroni 가 PostgreSQL 을 띄운다 (2026-10-16). systemd 는 줄 끝 주석을 못 읽으므로 주석은 윗줄에
+After=postgresql-17.service patroni.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/chargeops-backup.sh
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,55 @@
+// Dedicated observer: reuse Jenkins credentials; never build, deploy or merge.
+pipeline {
+  agent { label 'mgmt-agent' }
+  options {
+    timestamps()
+    skipDefaultCheckout(true)
+    disableConcurrentBuilds()
+    timeout(time: 5, unit: 'MINUTES')
+    buildDiscarder(logRotator(numToKeepStr: '30'))
+  }
+  triggers { cron('* * * * *') }
+  parameters {
+    string(name: 'GITHUB_PR_CREDENTIAL_ID', defaultValue: 'chargeops-github-pr-token',
+      description: 'Existing Secret text credential. Observer only reads PRs and reviews.')
+    string(name: 'SLACK_CREDENTIAL_ID', defaultValue: 'chargeops-cicd-slack-token',
+      description: 'Existing Slack Bot Secret text credential.')
+    string(name: 'SLACK_CHANNEL_ID', defaultValue: 'C0CBS4DFPGW', description: 'PR decision notification channel.')
+  }
+  environment {
+    SLACK_CICD_CHANNEL = "${params.SLACK_CHANNEL_ID}"
+  }
+  stages {
+    stage('Checkout observer') {
+      steps { checkout scm }
+    }
+    stage('Prepare observer') {
+      steps {
+        sh '''
+          set -eu
+          if [ ! -x .pr-notify-venv/bin/python ]; then
+            python3.12 -m venv .pr-notify-venv
+          fi
+          if ! .pr-notify-venv/bin/python -c 'import yaml' >/dev/null 2>&1; then
+            .pr-notify-venv/bin/python -m pip install 'PyYAML>=6,<7'
+          fi
+        '''
+      }
+    }
+    stage('Notify PR decisions') {
+      steps {
+        withCredentials([
+          string(credentialsId: params.GITHUB_PR_CREDENTIAL_ID.trim(), variable: 'GITHUB_PR_TOKEN'),
+          string(credentialsId: params.SLACK_CREDENTIAL_ID.trim(), variable: 'SLACK_CICD_TOKEN')
+        ]) {
+          sh '.pr-notify-venv/bin/python scripts/pr_notifications.py'
+        }
+      }
+    }
+  }
+  post {
+    always {
+      archiveArtifacts artifacts: '.pr-notifications/state.json', allowEmptyArchive: true
+    }
+  }
+}
