@@ -36,8 +36,8 @@ pipeline {
       description: 'Single Job: kim_chanju verifies Dev, opens PR, waits for approval+merge, then promotes the same digest to ops.')
     booleanParam(name: 'ENABLE_CANARY', defaultValue: true,
       description: 'After approved PR merge, promote the same Dev-verified CSMS digest through Ops 25/50/100 percent Canary with Git recovery.')
-    choice(name: 'DEV_DELIVERY_MODE', choices: ['auto', 'deployment', 'canary'],
-      description: 'Auto follows the verified Dev Application path; canary is separate from ENABLE_CANARY for ops.')
+    choice(name: 'DEV_DELIVERY_MODE', choices: ['auto', 'rolling', 'deployment', 'canary'],
+      description: 'Auto requires the one-time Dev RollingUpdate handover. deployment/canary are explicit legacy compatibility modes.')
     booleanParam(name: 'RUN_OCPP_FIXTURE_TEST', defaultValue: false,
       description: 'Optional: OCPP checks WRITE to the existing DB using a pre-approved CI-DEV charger. Default verification is read-only.')
     booleanParam(name: 'PUBLISH_DEV_TAG', defaultValue: false,
@@ -78,7 +78,8 @@ pipeline {
       steps {
         script {
           env.DEV_CHECK_STATE = 'not_started'
-          env.DEV_GITOPS_OVERLAY = params.DEV_DELIVERY_MODE == 'canary' ? 'chargeops-chatops/overlays/development-canary' : 'chargeops-chatops/overlays/development'
+          env.DEV_GITOPS_OVERLAY = params.DEV_DELIVERY_MODE == 'canary' ? 'chargeops-chatops/overlays/development-canary' :
+            (params.DEV_DELIVERY_MODE == 'deployment' ? 'chargeops-chatops/overlays/development' : 'chargeops-chatops/overlays/development-rolling')
           def checkoutVars = checkout scm
           env.CHECKOUT_BRANCH = (env.BRANCH_NAME ?: checkoutVars.GIT_BRANCH ?: env.GIT_BRANCH ?: '')
             .replaceFirst(/^refs\/heads\//, '').replaceFirst(/^origin\//, '')
@@ -171,6 +172,20 @@ pipeline {
           .ci-venv/bin/python -m pytest -q tests/
           python3.12 scripts/ci.py validate
         '''
+      }
+    }
+    stage('Validate Dev RollingUpdate handover') {
+      when { expression { params.ENABLE_ENVIRONMENT_CD && params.DEV_DELIVERY_MODE == 'auto' && env.PUBLISH_IMAGES == 'true' &&
+        (env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms') } }
+      steps {
+        withCredentials([file(credentialsId: params.DEV_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG')]) {
+          script {
+            def path = sh(script: '.ci-venv/bin/python scripts/env_cd.py dev-overlay', returnStdout: true).trim()
+            if (path != 'chargeops-chatops/overlays/development-rolling') {
+              error('Complete migrate-dev-rolling.py on mgmt before automatic delivery; Dev and Ops images unchanged.')
+            }
+          }
+        }
       }
     }
     stage('Registry Build and Push: changed images only') {
@@ -270,6 +285,7 @@ pipeline {
             script {
               if (params.DEV_DELIVERY_MODE == 'auto') {
                 env.DEV_GITOPS_OVERLAY = sh(script: '.ci-venv/bin/python scripts/env_cd.py dev-overlay', returnStdout: true).trim()
+                if (env.DEV_GITOPS_OVERLAY != 'chargeops-chatops/overlays/development-rolling') { error('Dev RollingUpdate handover is required') }
               }
             }
             dir('.gitops-delivery') {
@@ -314,6 +330,9 @@ pipeline {
         ]) {
           script {
             if ((env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')) {
+              // Existing-traffic policy needs no fixture; validate one only if
+              // the optional active smoke metric has explicitly been installed.
+              sh '.ci-venv/bin/python scripts/canary_cd.py check-fixture'
               sh '.ci-venv/bin/python scripts/github_cd.py open-pr'
             } else {
               sh '.ci-venv/bin/python scripts/github_cd.py open-ci-pr --source "$SOURCE_COMMIT"'
@@ -336,7 +355,8 @@ pipeline {
         }
       }
       steps {
-        timeout(time: 46, unit: 'MINUTES') {
+        // 45m approval wait plus bounded final GitHub lookup/PR closure.
+        timeout(time: 48, unit: 'MINUTES') {
           withCredentials([string(credentialsId: params.GITHUB_PR_CREDENTIAL_ID.trim(), variable: 'GITHUB_PR_TOKEN')]) {
             sh '.ci-venv/bin/python scripts/github_cd.py wait-merge --timeout 2700'
           }
@@ -393,8 +413,8 @@ pipeline {
     always {
       script {
         try {
-            if (env.DEV_CHECK_STATE == 'pending' && env.DEV_GITOPS_OVERLAY == 'chargeops-chatops/overlays/development-canary' && fileExists('.ci-venv/bin/python') && fileExists('artifacts/candidate.json')) {
-              notifyDelivery('Dev Canary failed; recovery started')
+            if (env.DEV_CHECK_STATE == 'pending' && ['chargeops-chatops/overlays/development-canary', 'chargeops-chatops/overlays/development-rolling'].contains(env.DEV_GITOPS_OVERLAY) && fileExists('.ci-venv/bin/python') && fileExists('artifacts/candidate.json')) {
+              notifyDelivery('Dev verification failed; recovery started')
               withCredentials([
                 usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD'),
                 file(credentialsId: params.DEV_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG')
@@ -403,7 +423,7 @@ pipeline {
                   sh '.ci-venv/bin/python scripts/env_cd.py recover-dev'
                 }
               }
-              notifyDelivery('Dev Canary recovery complete')
+              notifyDelivery('Dev recovery complete')
             }
           if (env.DEV_CHECK_STATE == 'pending' && fileExists('.ci-venv/bin/python')) {
             try { githubStatus('failure') } catch (Exception ignored) { echo 'Unable to publish failed Dev status; inspect GitHub permissions.' }

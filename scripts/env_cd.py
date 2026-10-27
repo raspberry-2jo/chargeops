@@ -22,6 +22,7 @@ REGISTRY = 'registry.chargeops.lab:5000'
 IMAGE = REGISTRY + '/chargeops/chargeops-csms'
 LEGACY_DEV = 'chargeops-chatops/overlays/development'
 CANARY_DEV = 'chargeops-chatops/overlays/development-canary'
+ROLLING_DEV = 'chargeops-chatops/overlays/development-rolling'
 DEV = os.environ.get('DEV_GITOPS_OVERLAY', LEGACY_DEV)
 PROD = 'chargeops-chatops/overlays/prod'
 CANARY = 'chargeops-chatops/overlays/canary'
@@ -209,7 +210,7 @@ def candidate_check(candidate):
     if candidate.get('schema') != 1 or not re.fullmatch(
             re.escape(IMAGE) + r'@sha256:[a-f0-9]{64}', candidate.get('image', '')):
         raise DeliveryPreflightError('Invalid CSMS candidate')
-    if candidate.get('verification_mode', 'read-only') not in ['read-only', 'ocpp-fixture']:
+    if candidate.get('verification_mode', 'read-only') not in ['read-only', 'ocpp-fixture', 'ocpp-simulation']:
         raise DeliveryPreflightError('Unknown verification mode')
     validate_dev_overlay()
     if candidate.get('development_overlay', LEGACY_DEV) != DEV:
@@ -217,15 +218,15 @@ def candidate_check(candidate):
 
 
 def validate_dev_overlay():
-    if DEV not in (LEGACY_DEV, CANARY_DEV):
-        raise DeliveryPreflightError('DEV_GITOPS_OVERLAY must select development or development-canary')
+    if DEV not in (LEGACY_DEV, CANARY_DEV, ROLLING_DEV):
+        raise DeliveryPreflightError('DEV_GITOPS_OVERLAY must select an allowed Dev delivery overlay')
 
 
 def detect_dev_overlay():
     app = kubectl('-n', 'argocd', 'get', 'application', APPLICATION)
     spec = app['spec']
     path = spec['source'].get('path')
-    if (spec['destination']['namespace'] != 'dev' or path not in (LEGACY_DEV, CANARY_DEV)
+    if (spec['destination']['namespace'] != 'dev' or path not in (LEGACY_DEV, CANARY_DEV, ROLLING_DEV)
             or spec['source'].get('targetRevision') != 'main'
             or spec['source'].get('repoURL') != 'https://github.com/raspberry-2jo/chargeops-gitops.git'):
         raise DeliveryPreflightError('Dev Application target is outside the allowed Dev delivery paths')
@@ -244,14 +245,14 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False):
     if '@sha256:' not in prod_image:
         raise DeliveryPreflightError('Production CSMS is not digest-pinned in GitOps. Run freeze-production.py on mgmt, then commit and push overlays/prod/kustomization.yaml before retrying')
     candidate = {'schema': 1, 'source': source, 'image': resolve_digest(IMAGE + ':' + tag),
-                 'verification_mode': 'ocpp-fixture' if ocpp_fixture_test else 'read-only',
+                 'verification_mode': 'ocpp-simulation' if DEV == ROLLING_DEV else ('ocpp-fixture' if ocpp_fixture_test else 'read-only'),
                  'production_fingerprint': before, 'previous_production_image': prod_image,
                  'development_overlay': DEV}
-    if DEV == CANARY_DEV:
+    if DEV in (CANARY_DEV, ROLLING_DEV):
         previous = csms_image(repo, DEV)
         if not re.fullmatch(re.escape(IMAGE) + r'@sha256:[a-f0-9]{64}', previous) or not live_candidate(previous):
-            raise DeliveryPreflightError('Dev Canary baseline must first be bootstrapped and Healthy')
-        candidate.update(development_mode='canary', previous_development_image=previous)
+            raise DeliveryPreflightError('Dev baseline must first be bootstrapped and Healthy')
+        candidate.update(development_mode='canary' if DEV == CANARY_DEV else 'rolling', previous_development_image=previous)
     if canary:
         candidate['canary_fingerprint'] = fingerprint(rendered(repo, CANARY))
     # A fixed pre-delivery timestamp is reused by all Canary analysis steps.
@@ -283,18 +284,28 @@ def live_candidate(image):
     deployment = kubectl('-n', 'dev', 'get', 'deployment', 'csms')
     if DEV == CANARY_DEV:
         return dev_rollout_ready(deployment, image)
-    if deployment['spec'].get('replicas') != 1:
+    desired = 2 if DEV == ROLLING_DEV else 1
+    if deployment['spec'].get('replicas') != desired:
         return False
     container = next(c for c in deployment['spec']['template']['spec']['containers'] if c['name'] == 'csms')
     state = deployment.get('status', {})
     if container['image'] != image or state.get('observedGeneration', 0) < deployment['metadata']['generation']:
         return False
-    if state.get('updatedReplicas') != 1 or state.get('availableReplicas') != 1 or state.get('replicas') != 1:
+    if any(state.get(key) != desired for key in ('updatedReplicas', 'availableReplicas', 'readyReplicas', 'replicas')):
         return False
+    if DEV == ROLLING_DEV:
+        if deployment['spec'].get('strategy', {}).get('type') != 'RollingUpdate':
+            return False
+        replicasets = kubectl('-n', 'dev', 'get', 'replicasets', '-l', 'app=csms')['items']
+        owned = {r['metadata']['uid'] for r in replicasets if any(
+            o.get('controller') and o.get('uid') == deployment['metadata']['uid'] for o in r['metadata'].get('ownerReferences', []))}
+    else:
+        owned = None
     pods = kubectl('-n', 'dev', 'get', 'pods', '-l', 'app=csms')['items']
     active = [p for p in pods if not p['metadata'].get('deletionTimestamp')]
-    return len(active) == 1 and all(
-        p['spec']['containers'][0]['image'] == image
+    return len(active) == desired and all(
+        next(c['image'] for c in p['spec']['containers'] if c['name'] == 'csms') == image
+        and (owned is None or any(o.get('controller') and o.get('uid') in owned for o in p['metadata'].get('ownerReferences', [])))
         and any(c['type'] == 'Ready' and c['status'] == 'True' for c in p.get('status', {}).get('conditions', []))
         for p in active)
 
@@ -332,6 +343,12 @@ def dev_rollout_ready(deployment, image):
 
 
 def dev_rollout_failed(image):
+    if DEV == ROLLING_DEV:
+        deployment = kubectl('-n', 'dev', 'get', 'deployment', 'csms')
+        if next(c['image'] for c in deployment['spec']['template']['spec']['containers'] if c['name'] == 'csms') != image:
+            return False
+        return any(c.get('type') == 'Progressing' and c.get('status') == 'False'
+                   and c.get('reason') == 'ProgressDeadlineExceeded' for c in deployment.get('status', {}).get('conditions', []))
     if DEV != CANARY_DEV:
         return False
     deployment = kubectl('-n', 'dev', 'get', 'deployment', 'csms')
@@ -350,7 +367,7 @@ def dev_rollout_failed(image):
 def verification_job(candidate):
     probe = Path(__file__).with_name('csms_smoke.py').read_text(encoding='utf-8')
     name = 'csms-check-' + fingerprint(candidate)[:16]
-    return {'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': {'name': name, 'namespace': 'dev'},
+    job = {'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': {'name': name, 'namespace': 'dev'},
             'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': 180, 'ttlSecondsAfterFinished': 3600,
                      'template': {'spec': {'restartPolicy': 'Never', 'automountServiceAccountToken': False,
                          'securityContext': {'runAsNonRoot': True, 'runAsUser': 10001, 'runAsGroup': 10001},
@@ -361,6 +378,16 @@ def verification_job(candidate):
                                          {'secretRef': {'name': 'chargeops-dev-secrets'}}],
                              'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'},
                                            'limits': {'cpu': '500m', 'memory': '256Mi'}}}]}}}}
+    if DEV == ROLLING_DEV:
+        pod = job['spec']['template']
+        pod['metadata'] = {'labels': {'chargeops.io/role': 'dev-release-probe'}}
+        job['spec']['activeDeadlineSeconds'] = 240
+        container = pod['spec']['containers'][0]
+        container['command'] = ['python', '-m', 'csms.release_probe']
+        container['env'] = [{'name': 'POD_NAMESPACE', 'valueFrom': {'fieldRef': {'fieldPath': 'metadata.namespace'}}},
+                            {'name': 'OCPP_TEST_CHARGER_ID', 'value': 'CI-DEV-CANARY-01'}]
+        container['ports'] = [{'name': 'probe-metrics', 'containerPort': 9110}]
+    return job
 
 
 def log_dev_progress(started, timeout):
@@ -394,7 +421,8 @@ def verify(repo, candidate_path, receipt_path, timeout):
     next_progress = started
     while time.monotonic() < deadline:
         if dev_rollout_failed(candidate['image']):
-            raise DeliveryPreflightError('Dev Canary analysis aborted the candidate; Dev recovery is required')
+            raise DeliveryPreflightError('Dev RollingUpdate failed; Dev recovery is required' if DEV == ROLLING_DEV else
+                                         'Dev Canary analysis aborted the candidate; Dev recovery is required')
         if live_candidate(candidate['image']):
             break
         if time.monotonic() >= next_progress:
@@ -407,7 +435,7 @@ def verify(repo, candidate_path, receipt_path, timeout):
     job = verification_job(candidate)
     name = job['metadata']['name']
     run('kubectl', 'create', '-f', '-', payload=json.dumps(job))
-    run('kubectl', '-n', 'dev', 'wait', '--for=condition=complete', f'job/{name}', '--timeout=210s')
+    run('kubectl', '-n', 'dev', 'wait', '--for=condition=complete', f'job/{name}', '--timeout=270s')
     result = kubectl('-n', 'dev', 'get', 'job', name)
     print(run('kubectl', '-n', 'dev', 'logs', f'job/{name}', '--all-containers=true'))
     if not live_candidate(candidate['image']):
@@ -425,8 +453,8 @@ def recover_dev(repo, candidate_path, recovery_path, timeout=600):
     """Restore only this failed candidate's Dev image; never use Ops credentials."""
     candidate = load(candidate_path)
     candidate_check(candidate)
-    if candidate.get('development_mode') != 'canary' or DEV != CANARY_DEV:
-        print('Dev image recovery skipped: candidate did not use Dev Canary')
+    if candidate.get('development_mode') not in ('canary', 'rolling') or DEV not in (CANARY_DEV, ROLLING_DEV):
+        print('Dev image recovery skipped: candidate did not use managed Dev delivery')
         return
     previous = candidate.get('previous_development_image', '')
     if not re.fullmatch(re.escape(IMAGE) + r'@sha256:[a-f0-9]{64}', previous):
@@ -444,7 +472,7 @@ def recover_dev(repo, candidate_path, recovery_path, timeout=600):
             raise DeliveryPreflightError('Dev recovery unexpectedly changed production')
         save(recovery_path, {'candidate': fingerprint(candidate), 'phase': 'recovering',
                              'image': previous, 'revision': None})
-        revision = commit(repo, DEV, 'revert(dev): restore baseline after failed Canary')
+        revision = commit(repo, DEV, 'revert(dev): restore baseline after failed verification')
         receipt = load(recovery_path)
         receipt['revision'] = revision
         save(recovery_path, receipt)
@@ -456,7 +484,7 @@ def recover_dev(repo, candidate_path, recovery_path, timeout=600):
             receipt = load(recovery_path)
             receipt.update(phase='recovered', verified_at=int(time.time()))
             save(recovery_path, receipt)
-            print('Dev recovery complete: previous Git digest restored and stable Dev Rollout verified')
+            print('Dev recovery complete: previous Git digest restored and Dev workload verified')
             return
         time.sleep(5)
     raise DeliveryPreflightError('Dev recovery Git digest restored; stable Rollout verification timed out')
