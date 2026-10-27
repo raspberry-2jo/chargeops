@@ -18,7 +18,11 @@ SYNC_RESOURCES = [
     {'group': 'apps', 'kind': 'Deployment', 'name': 'csms'},
     {'group': '', 'kind': 'ConfigMap', 'name': 'csms-canary-probe'},
     {'group': '', 'kind': 'ConfigMap', 'name': 'csms-ops-service-gate-settings'},
+    {'group': '', 'kind': 'ConfigMap', 'name': 'csms-ops-ocpp-settings'},
+    {'group': '', 'kind': 'Service', 'name': 'csms-canary'},
+    {'group': 'networking.k8s.io', 'kind': 'NetworkPolicy', 'name': 'csms-canary-probe'},
     {'group': 'argoproj.io', 'kind': 'AnalysisTemplate', 'name': 'csms-availability'},
+    {'group': 'argoproj.io', 'kind': 'Rollout', 'name': 'csms'},
     {'group': '', 'kind': 'ServiceAccount', 'name': 'csms-ops-service-gate'},
     {'group': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': 'csms-ops-service-gate'},
     {'group': 'rbac.authorization.k8s.io', 'kind': 'RoleBinding', 'name': 'csms-ops-service-gate'},
@@ -64,7 +68,24 @@ def check_application():
     return app
 
 
+def validate_ops_fixture(repo):
+    documents = cd.rendered(repo, cd.CANARY)
+    # The standard policy observes existing charger traffic. A reserved ID is
+    # required only when an operator explicitly adds the active smoke metric.
+    if not any(d['kind'] == 'AnalysisTemplate' and any(
+            m.get('name') == 'websocket-ocpp-smoke' for m in d.get('spec', {}).get('metrics', []))
+            for d in documents):
+        return False
+    settings = next((d.get('data', {}) for d in documents
+                     if d['kind'] == 'ConfigMap' and d['metadata']['name'] == 'csms-ops-ocpp-settings'), None)
+    if settings is None or (not cd.re.fullmatch(r'CI-OPS-CANARY-[A-Za-z0-9_-]{1,40}', settings.get('OCPP_TEST_CHARGER_ID', ''))
+                            or settings.get('OCPP_FIXTURE_RESERVED') != 'true'):
+        raise cd.DeliveryPreflightError('Ops OCPP fixture is not configured: register and exclusively reserve a CI-OPS-CANARY ID before promotion')
+    return True
+
+
 def preflight(repo, candidate_path):
+    validate_ops_fixture(repo)
     candidate = cd.load(candidate_path)
     cd.candidate_check(candidate)
     cd.ensure_clean(repo)
@@ -246,13 +267,16 @@ def deliver(repo, delivery_path, timeout):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['preflight', 'run', 'recover'])
+    parser.add_argument('command', choices=['check-fixture', 'preflight', 'run', 'recover'])
     parser.add_argument('--repo', default='.gitops-delivery')
     parser.add_argument('--candidate', default='artifacts/candidate.json')
     parser.add_argument('--delivery', default='artifacts/production-delivery.json')
     parser.add_argument('--timeout', type=int, default=1200)
     args = parser.parse_args()
-    if args.command == 'preflight':
+    if args.command == 'check-fixture':
+        active = validate_ops_fixture(args.repo)
+        print('Optional active Ops probe configured' if active else 'Ops uses existing charger metrics; no test charger ID required')
+    elif args.command == 'preflight':
         preflight(args.repo, args.candidate)
     elif args.command == 'run':
         deliver(args.repo, args.delivery, args.timeout)

@@ -146,9 +146,9 @@ def test_overlay_injection_is_rejected_before_git_or_cluster(monkeypatch):
 
 def test_pipeline_opt_in_and_dev_only_recovery_credentials():
     pipeline = (ROOT / 'Jenkinsfile').read_text()
-    assert "choices: ['auto', 'deployment', 'canary']" in pipeline
+    assert "choices: ['auto', 'rolling', 'deployment', 'canary']" in pipeline
     assert 'scripts/env_cd.py dev-overlay' in pipeline
-    block = pipeline[pipeline.index("if (env.DEV_CHECK_STATE == 'pending' && env.DEV_GITOPS_OVERLAY"):]
+    block = pipeline[pipeline.index("if (env.DEV_CHECK_STATE == 'pending' && ['chargeops-chatops/overlays/development-canary'"):]
     block = block[:block.index("if (env.DEV_CHECK_STATE == 'pending' && fileExists")]
     assert 'DEV_KUBECONFIG_CREDENTIAL_ID' in block
     assert 'CANARY_KUBECONFIG_CREDENTIAL_ID' not in block
