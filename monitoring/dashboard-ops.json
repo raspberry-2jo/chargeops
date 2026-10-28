@@ -2371,6 +2371,141 @@
               "legendFormat": "리셋 {{type}} {{result}}"
             }
           ]
+        },
+        {
+          "id": 49,
+          "type": "stat",
+          "title": "백업 저장소 마지막 성공 (경과)",
+          "description": "pgBackRest repo별로 마지막 백업이 끝난 뒤 지난 시간. repo1 = MinIO(s3.chargeops.lab), repo2 = AWS S3. 매일 03:40 백업이라 26시간을 넘으면 빨간색. 값은 DB 서버 타이머(chargeops-backup-status, 10분마다)가 backup_repo_status 표에 저장함.",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 59,
+            "w": 8,
+            "h": 5
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "chargeops-db"
+              },
+              "editorMode": "code",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT max(extract(epoch FROM now() - last_stop)) FILTER (WHERE repo = 1) AS \"repo1 (MinIO)\", max(extract(epoch FROM now() - last_stop)) FILTER (WHERE repo = 2) AS \"repo2 (AWS S3)\" FROM backup_repo_status"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "decimals": 1,
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 93600
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "value_and_name",
+            "justifyMode": "auto",
+            "orientation": "horizontal"
+          }
+        },
+        {
+          "id": 50,
+          "type": "table",
+          "title": "백업 저장소별 상태",
+          "description": "repo별 마지막 백업(종류 · 라벨 · 끝난 시각 · 크기)과 결과. result가 error면 pgBackRest가 그 백업에 오류를 표시한 것. repo status에 error가 보이면 pgbackrest info 자체가 실패한 것.",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 59,
+            "w": 16,
+            "h": 5
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "chargeops-db"
+              },
+              "editorMode": "code",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT repo_name AS \"repo\", last_type AS \"type\", last_label AS \"label\", last_stop AS \"finished\", round(size_bytes / 1048576.0, 1) AS \"size MB\", CASE WHEN last_error THEN 'error' ELSE 'ok' END AS \"result\", repo_status AS \"repo status\", checked_at AS \"checked\" FROM backup_repo_status ORDER BY repo"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "result"
+                },
+                "properties": [
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "type": "value",
+                        "options": {
+                          "ok": {
+                            "color": "green",
+                            "index": 0
+                          },
+                          "error": {
+                            "color": "red",
+                            "index": 1
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "showHeader": true
+          }
         }
       ]
     },
