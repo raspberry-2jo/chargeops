@@ -281,11 +281,15 @@ def open_pr(repo, candidate_path, receipt_path, output):
     if (cd.fingerprint(cd.rendered(repo, cd.DEV)) != candidate['development_fingerprint']
             or not cd.live_candidate(candidate['image'])):
         raise cd.DeliveryPreflightError('Dev no longer runs the verified PR candidate')
+    release_images = cd.candidate_images(candidate)
+    app_details = '\n'.join('- `' + image + '`' for repository, image in sorted(release_images.items()) if repository != cd.IMAGE)
     return source_pr(candidate['source'], output,
         'Dev integration checks passed for source `' + candidate['source'] + '`.\n\n'
         'Verified CSMS image: `' + candidate['image'] + '`.\n\n'
+        + ('Other built images for regular Ops deployment (not runtime-tested in the CSMS-only Dev environment):\n'
+           + app_details + '\n\n' if app_details else '') +
         'Review the full source diff. Approval and merge resume this same Jenkins build. '
-        'It rechecks reviews and the merged apps tree, then promotes this exact Dev-verified digest to ops. '
+        'It rechecks reviews and the merged apps tree, then promotes the pinned app images to ops; only CSMS uses Canary. '
         'Production has not been changed by this preview build.', candidate['image'])
 
 

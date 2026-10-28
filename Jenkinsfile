@@ -33,7 +33,7 @@ pipeline {
     booleanParam(name: 'BUILD_ALL_IMAGES', defaultValue: false,
       description: 'Build all six images. The first build automatically builds all images.')
     booleanParam(name: 'ENABLE_ENVIRONMENT_CD', defaultValue: true,
-      description: 'Single Job: kim_chanju verifies Dev, opens PR, waits for approval+merge, then promotes the same digest to ops.')
+      description: 'Verify CSMS in Dev, wait for source approval+merge, then deploy built app digests to ops; only CSMS uses Canary.')
     booleanParam(name: 'ENABLE_CANARY', defaultValue: true,
       description: 'After approved PR merge, promote the same Dev-verified CSMS digest through Ops 25/50/100 percent Canary with Git recovery.')
     choice(name: 'DEV_DELIVERY_MODE', choices: ['auto', 'rolling', 'deployment', 'canary'],
@@ -153,6 +153,10 @@ pipeline {
                 else { selected.addAll(allImages) }
               }
             }
+          }
+          // CSMS remains the Dev verification anchor even for a notifier-only release.
+          if (params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true') {
+            selected.add('chargeops-csms')
           }
           env.APP_CHANGED = (runTests || !selected.isEmpty()).toString()
           env.BUILD_IMAGES = selected.join(' ')
@@ -303,7 +307,7 @@ pipeline {
               if [ "$RUN_OCPP_FIXTURE_TEST" = 'true' ]; then OCPP_OPTION='--ocpp-fixture-test'; fi
               CANARY_OPTION=''
               if [ "$ENABLE_CANARY" = 'true' ]; then CANARY_OPTION='--canary'; fi
-              .ci-venv/bin/python scripts/env_cd.py prepare --tag "$IMAGE_TAG" --source "$(git rev-parse HEAD)" $OCPP_OPTION $CANARY_OPTION
+              .ci-venv/bin/python scripts/env_cd.py prepare --tag "$IMAGE_TAG" --source "$(git rev-parse HEAD)" --images "$BUILD_IMAGES" $OCPP_OPTION $CANARY_OPTION
               .ci-venv/bin/python scripts/env_cd.py verify
             '''
           }
