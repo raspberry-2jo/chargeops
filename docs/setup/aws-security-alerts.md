@@ -3,7 +3,7 @@
 - 담당: 황채연 (AWS)
 - 관련 WBS: 2.2 후속 (AWS 경보 · 보안 감사)
 - 버전: versions.md 참고 (AWS 콘솔 · AWS CLI v2)
-- 상태: **2026-10-28 확인** — 보안 경보 4종 · 생존 신호 경보 모두 OK, 알림 대상 전부 `chargeops-alerts`, Config 규칙 4개 동작
+- 상태: **2026-10-28 확인** — 보안 경보 4종 · 생존 신호 경보 모두 OK, 알림 대상 전부 `chargeops-alerts`, Config 규칙 4개 동작. **10/28 15:58 재시험으로 Config 미준수 → Slack · 메일 수신 확인** (전달 실패 원인 수정 후, 5장)
 - 관련: [`aws-dr-vpc.md`](aws-dr-vpc.md) (SNS `chargeops-alerts` · 생존 신호 · 예산 = alerts 스택 Terraform), [`aws-backup-watch.md`](aws-backup-watch.md) (백업 감시도 같은 토픽)
 
 ## 0. 결과 요약
@@ -18,8 +18,13 @@
 
 | 시험 | 결과 |
 |---|---|
-| 일부러 SSH 전체 공개 보안 그룹을 만들었다 지움 | Config `restricted-ssh` 미준수 → EventBridge → SNS 메일 수신 (당시 대상은 옛 토픽 `chargeops-ops-alerts`. `chargeops-alerts` 로 옮긴 뒤 재시험은 아직) |
+| 일부러 SSH 전체 공개 보안 그룹을 만들었다 지움 (처음) | Config `restricted-ssh` 미준수 → EventBridge → SNS 메일 수신 (당시 대상은 옛 토픽 `chargeops-ops-alerts`) |
+| 10/28 재시험 ① 보안 그룹 변경 경보 | 15:44 보안 그룹 생성 · 규칙 추가 → 15:46 `chargeops-sec-SecurityGroupChanges` ALARM, **Slack · 메일 둘 다 수신** (변경 2건 집계, 약 2분) |
+| 10/28 재시험 ② Config 1차 | 약 6분 뒤 미준수 판정, 하지만 **알림이 안 옴** — EventBridge 전달 실패 1건 (원인 · 해결은 5장) |
+| 10/28 재시험 ③ Config 2차 (수정 후) | 보안 그룹을 다시 만들고 2분 안에 판정 → 15:58 **Slack 에 AWS Config 카드 · 메일(JSON) 수신** ✅ |
 | 10/21 밤 실제 `RootUsage` 경보 | 확인 결과 계정 주인의 비밀번호 재설정 로그인 (침입 아님) → 경보가 실제로 동작함을 확인 |
+
+![Config 미준수 알림 — Slack (2026-10-28, 계정 번호 · 자원 ID 가림)](img/aws-config-alert-slack.png)
 
 ![AWS 아키텍처 (2026-10-28)](img/aws-architecture.png)
 
@@ -97,6 +102,7 @@ aws events put-targets --rule chargeops-config-noncompliant --targets "Id=sns,Ar
 ```
 
 - `chargeops-alerts` 토픽 정책에 `events.amazonaws.com` 발송 허락이 이미 있다 (alerts 스택 `aws_sns_topic_policy`)
+- 대상은 **역할(RoleArn) 없이** 등록한다. 토픽 정책으로 보낸다. 콘솔에서 대상을 만들면 `Amazon_EventBridge_Invoke_Sns_<숫자>` 역할이 자동으로 붙는데, 그 역할은 만들 때 고른 토픽에만 보낼 수 있다 (5장)
 - 상태가 **미준수로 바뀔 때만** 알림이 온다. 이미 미준수인 자원은 다시 알리지 않는다
 
 ### 2-4. Slack (콘솔)
@@ -113,7 +119,7 @@ Amazon Q Developer in chat applications → Slack 워크스페이스 연결(브�
 | 로그 그룹 · 역할 | `chargeops-cloudtrail` (30일) · `chargeops-cloudtrail-to-cwlogs` | |
 | 지표 필터 · 경보 | 네임스페이스 `ChargeOps/Security` · `chargeops-sec-*` 4개 | 2-2 |
 | Config | 기록기 (5종) · 규칙 4개 · 기록 버킷 `config-bucket-<계정>` | |
-| EventBridge | `chargeops-config-noncompliant` | 2-3 패턴 |
+| EventBridge | `chargeops-config-noncompliant` | 2-3 패턴 · 대상 `chargeops-alerts` · 역할 없음 (10/28 수정) |
 | SNS · 메일 구독 | `chargeops-alerts` | alerts 스택 Terraform ([`aws-dr-vpc.md`](aws-dr-vpc.md) 2-3) |
 | Slack | Amazon Q 설정 `chargeops-ops-alerts-slack` → `#chargeops-alerts` | |
 
@@ -126,6 +132,7 @@ aws cloudwatch describe-alarms --query "MetricAlarms[].[AlarmName,MetricName,Sta
 aws cloudwatch describe-alarms --query "MetricAlarms[].[AlarmName,AlarmActions[0]]" --output text | awk -F'\t' '{n=split($2,a,":"); print $1, a[n]}'
 aws configservice describe-config-rules --query "ConfigRules[].[ConfigRuleName,Source.SourceIdentifier]" --output table
 aws events list-targets-by-rule --rule chargeops-config-noncompliant --query "Targets[].Arn" --output text | tr '\t' '\n' | awk -F: '{print $NF}'
+aws events list-targets-by-rule --rule chargeops-config-noncompliant --query 'Targets[].RoleArn!=`null`' --output text
 aws sns list-subscriptions --query "Subscriptions[].[Protocol,TopicArn]" --output text | awk '{n=split($2,a,":"); print $1, a[n]}' | grep chargeops-alerts
 aws guardduty list-detectors --output text
 ```
@@ -134,12 +141,26 @@ aws guardduty list-detectors --output text
 CloudTrail   chargeops-events | True | True | True
 경보         chargeops-mgmt-heartbeat · chargeops-sec-CloudTrailChanges · -ConsoleLoginFailures · -RootUsage · -SecurityGroupChanges → 모두 OK · 대상 chargeops-alerts
 Config 규칙  cloudtrail-enabled · restricted-ssh · root-account-mfa-enabled · s3-bucket-public-read-prohibited
-EventBridge  chargeops-config-noncompliant → chargeops-alerts
+EventBridge  chargeops-config-noncompliant → chargeops-alerts · 역할 False (10/28 수정 후)
 SNS 구독     email chargeops-alerts · https chargeops-alerts
 GuardDuty    (없음)
 ```
 
-**시험** — 보안 그룹 `chargeops-test-ssh-open` 을 SSH `0.0.0.0/0` 로 만들고 몇 분 기다린다 → Config `restricted-ssh` 미준수 → 메일 · Slack 확인 → **바로 삭제**. (발표 전 재시험 예정) 서버에 붙이지 않은 보안 그룹이라 실제로 열리는 문은 없다.
+**시험** — 보안 그룹 `chargeops-test-ssh-open` 을 SSH `0.0.0.0/0` 로 만들고 기다린다 → Config `restricted-ssh` 미준수 → 메일 · Slack 확인 → **바로 삭제**. 서버에 붙이지 않은 보안 그룹이라 실제로 열리는 문은 없다. 팀 규칙은 "0.0.0.0/0 금지"라서 **팀 채널에 먼저 알리고, 15분 안에 지운다.** CloudShell 탭이 `ap-northeast-2` 인지 먼저 본다.
+
+```bash
+# ===== 실행할 명령어 (CloudShell, 서울) =====
+SG=$(aws ec2 create-security-group --group-name chargeops-test-ssh-open --description "config test - delete after" --query GroupId --output text) && echo created
+aws ec2 authorize-security-group-ingress --group-id "$SG" --protocol tcp --port 22 --cidr 0.0.0.0/0 --query Return --output text
+date
+# 1~2분마다: 1 이 나오면 미준수 판정
+aws configservice get-compliance-details-by-config-rule --config-rule-name restricted-ssh --compliance-types NON_COMPLIANT --query "EvaluationResults[].EvaluationResultIdentifier.EvaluationResultQualifier.ResourceId" --output text | grep -c "$SG"
+# 알림 확인 즉시 (또는 15분이 지나면 무조건) 삭제 → 0 이면 끝
+aws ec2 delete-security-group --group-id "$SG"
+aws ec2 describe-security-groups --filters Name=group-name,Values=chargeops-test-ssh-open --query "length(SecurityGroups)" --output text
+# 알림이 안 오면: EventBridge 가 받았는지 · 보내다 실패했는지 (시각은 UTC 로 바꿔 넣는다)
+for M in TriggeredRules Invocations FailedInvocations; do echo "$M: $(aws cloudwatch get-metric-statistics --namespace AWS/Events --metric-name $M --dimensions Name=RuleName,Value=chargeops-config-noncompliant --start-time <시작 UTC> --end-time <끝 UTC> --period 300 --statistics Sum --query 'Datapoints[].Sum' --output text)"; done
+```
 
 ## 5. 막혔던 점
 
@@ -148,9 +169,11 @@ GuardDuty    (없음)
 | 알림 토픽이 두 개로 나뉨 (콘솔에서 만든 `chargeops-ops-alerts` · Terraform 의 `chargeops-alerts`) | 경보 4종 · EventBridge 대상을 `chargeops-alerts` 하나로 모음 (4장 결과). 옛 토픽은 메일 구독만 남아 있음 → 7장 |
 | 로그 스트림이 비어 있음 | CloudTrail 이 몇 분씩 모아 보냄. 5~15분 기다리면 들어옴 |
 | 지표 필터 만들 때 차원을 넣으면 기본값 오류 | 차원은 비워 둠 (기본값 0 이 있어야 "데이터 없음"으로 헷갈리지 않음) |
-| Config 알림 메일이 JSON 그대로 옴 | 메일은 그대로 둠 (입력 변환기 미적용). Slack 에서 어떻게 보이는지는 재시험 때 확인 |
+| **토픽을 `chargeops-alerts` 로 바꾼 뒤 Config 알림이 안 옴** (10/28 재시험에서 발견) | Config 판정 ✅ → EventBridge `TriggeredRules` 1 · `Invocations` 1 · **`FailedInvocations` 1**. 토픽 정책 · 암호화(없음) · 대상 주소는 정상이었고, 대상에 콘솔이 만든 역할 `Amazon_EventBridge_Invoke_Sns_<숫자>` 가 붙어 있었음. 그 역할은 **옛 토픽 `chargeops-ops-alerts` 에만** 보낼 수 있어서 거절됨 → 대상 설정을 백업한 뒤 같은 Id · 같은 토픽으로 **역할 없이** 다시 등록 (`put-targets`) → 재시험에서 Slack · 메일 수신 |
+| Config 알림 메일이 JSON 그대로 옴 | 메일은 그대로 둠 (입력 변환기 미적용). Slack 은 Amazon Q 가 **AWS Config 카드**로 정리해서 보여 줌 (10/28 확인) |
+| CloudShell 에서 Config · EventBridge 규칙이 "없다"고 나옴 | CloudShell 탭이 버지니아(`us-east-1`)로 열려 있었음 → 콘솔 지역을 서울로 바꾸고 탭 이름 `ap-northeast-2` 확인 |
 | 10/21 밤 root 로그인 경보 | 계정 주인의 비밀번호 재설정 로그인으로 확인. 침입 아님 |
-| (주의) 알림은 실시간이 아님 | CloudTrail → CloudWatch Logs 전달에 몇 분 걸려 보통 5~15분 안에 옴 |
+| (주의) 알림은 실시간이 아님 | 보안 그룹 변경 경보 약 2분 (CloudTrail → Logs → 5분 집계), Config 미준수 2~6분 (기록 → 규칙 검사 → EventBridge). AWS 가 시간을 보장하지는 않음 |
 
 ## 6. 비용 (서울, 근사치 — 청구서로 확인)
 
@@ -163,7 +186,7 @@ GuardDuty    (없음)
 
 ## 7. 다음
 
-- Config 미준수 → `chargeops-alerts` → 메일 · Slack 재시험 (4장 시험, 발표 캡처용)
 - 옛 토픽 `chargeops-ops-alerts` (메일 구독만 남음) 정리 — 구독자 확인 후
 - GuardDuty — 계정 플랜이 바뀌면 `enable_guardduty=true`
 - 프로젝트 끝: Config **기록 중지**(요금), 콘솔로 만든 자원(경보 · 지표 필터 · EventBridge 규칙 · CloudWatch Logs 연결)은 Terraform 밖이라 직접 지움
+- 프로젝트 끝: 더 이상 안 쓰는 역할 `Amazon_EventBridge_Invoke_Sns_<숫자>` 와 그 정책 삭제, CloudShell 의 대상 백업 파일 `~/eb-target-backup-1028.json` 삭제
