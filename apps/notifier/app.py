@@ -137,6 +137,25 @@ def attach_ai(inc_id: int, ts: str):
 
 
 # ───────── Alertmanager 웹훅 ─────────
+def virtual_charger_ids(charger_ids):
+    """Exclude registered virtual chargers and reserved simulation/load-test IDs."""
+    virtual = {cid for cid in charger_ids if cid.startswith(("CI-DEV-", "CI-OPS-CANARY-", "LT-"))}
+    remaining = sorted(set(charger_ids) - virtual)
+    if remaining:
+        virtual.update(r["charger_id"] for r in q(
+            "SELECT charger_id FROM charger WHERE charger_id = ANY(%s) AND source = 'virtual'",
+            (remaining,)))
+    return virtual
+
+
+def service_alerts(alerts, common=None):
+    common = common or {}
+    ids = {a.get("labels", {}).get("charger_id", common.get("charger_id")) for a in alerts}
+    virtual = virtual_charger_ids(ids - {None, ""})
+    return [a for a in alerts
+            if a.get("labels", {}).get("charger_id", common.get("charger_id")) not in virtual]
+
+
 def severity_for(code: str, base: str, n: int) -> str:
     """같은 충전소 동시 장애 수로 등급 상향: 3대↑ SEV2, 5대↑ & 전체 30%↑ SEV1"""
     if code.startswith("C-") and code not in ("C-03", "C-05"):
@@ -156,7 +175,11 @@ async def alertmanager(req: Request):
     code = common.get("code")
     if not code:
         return {"skipped": "no code label"}
-    firing = [a for a in body["alerts"] if a["status"] == "firing"]
+    alerts = service_alerts(body["alerts"], common)
+    if not alerts:
+        log.info("alertmanager: skipped virtual charger alerts")
+        return {"skipped": "virtual charger alerts"}
+    firing = [a for a in alerts if a["status"] == "firing"]
     station = common.get("station_id")
     fp = f"{code}:{station or common.get('charger_id') or common.get('alertname')}"
     open_inc = q1("SELECT * FROM incident WHERE fingerprint=%s AND status <> 'resolved'", (fp,))
@@ -216,6 +239,9 @@ def poll_anomaly():
                    ORDER BY detected_at"""):
         cid, lvl = ev["charger_id"], ev["level"]
         try:
+            if cid in virtual_charger_ids({cid}):
+                q("UPDATE anomaly_event SET notified_at = now() WHERE anomaly_id=%s", (ev["anomaly_id"],))
+                continue
             if lvl == "WATCH":                    # WATCH: Slack 없이 수집 주기만 5초로 강화
                 csms_watch(cid)
             else:
@@ -261,7 +287,7 @@ def reconcile():
     except Exception as e:
         log.warning("reconcile skip (alertmanager): %s", e)
         return
-    firing = {(a["labels"].get("code"), a["labels"].get("station_id")) for a in alerts}
+    firing = {(a["labels"].get("code"), a["labels"].get("station_id")) for a in service_alerts(alerts)}
     codes = {c for c, _ in firing}
     rows = q("""SELECT incident_id, type_code, station_id, detected_at, slack_thread_ts FROM incident
                 WHERE status <> 'resolved' AND type_code NOT IN ('A-01', 'C-05')""")

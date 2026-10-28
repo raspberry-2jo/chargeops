@@ -107,18 +107,23 @@ def preflight(repo, candidate_path):
     print('Canary preflight passed; no production changes')
 
 
-def sync(revision):
+def sync(revision, workloads=None):
     if not cd.re.fullmatch(r'[a-f0-9]{40}', revision):
         raise cd.DeliveryPreflightError('A committed Git revision is required for Sync')
     app = check_application()
     if app.get('operation') or app.get('status', {}).get('operationState', {}).get('phase') in ['Running', 'Terminating']:
         raise cd.DeliveryPreflightError('An ops Sync is already running; refusing a concurrent operation')
-    # Selective Sync does not reapply unrelated workloads, CronJobs or PVCs.
+    resources = list(SYNC_RESOURCES)
+    for workload in workloads or []:
+        resource = {key: workload[key] for key in ('group', 'kind', 'name')}
+        if resource not in resources:
+            resources.append(resource)
+    # Only approved application workloads join the CSMS resources; no PVCs or pruning.
     marker = 'chargeops-jenkins-' + uuid.uuid4().hex[:12]
     operation = {'operation': {'initiatedBy': {'username': marker},
                  'info': [{'name': 'chargeops-operation-id', 'value': marker}],
                  'sync': {'revision': revision, 'prune': False,
-                          'resources': SYNC_RESOURCES}}}
+                          'resources': resources}}}
     cd.run('kubectl', '-n', 'argocd', 'patch', 'application', APPLICATION, '--type=merge', '-p', json.dumps(operation))
     return marker
 
@@ -197,7 +202,27 @@ def owns_operation(state, revision, marker):
     return operation.get('initiatedBy', {}).get('username') == marker
 
 
-def wait(image, revision, timeout, marker):
+def regular_workloads_ready(workloads, operation):
+    """Deployments must converge; CronJob templates must be applied by this Sync."""
+    results = operation.get('syncResult', {}).get('resources', [])
+    for workload in workloads:
+        if not any(r.get('kind') == workload['kind'] and r.get('name') == workload['name']
+                   and r.get('namespace') == 'ops' and r.get('status') == 'Synced' for r in results):
+            return False
+        if workload['kind'] == 'Deployment':
+            deployment = cd.kubectl('-n', 'ops', 'get', 'deployment', workload['name'])
+            actual = {c['name']: c['image'] for c in deployment['spec']['template']['spec']['containers']}
+            if any(actual.get(name) != image for name, image in workload['images'].items()):
+                return False
+            desired = deployment['spec'].get('replicas', 1)
+            state = deployment.get('status', {})
+            if state.get('observedGeneration', 0) < deployment['metadata']['generation'] or any(
+                    state.get(key, 0) != desired for key in ('replicas', 'updatedReplicas', 'readyReplicas', 'availableReplicas')):
+                return False
+    return True
+
+
+def wait(image, revision, timeout, marker, workloads=None):
     deadline = time.monotonic() + timeout
     last_phase = None
     last_checks = None
@@ -207,18 +232,20 @@ def wait(image, revision, timeout, marker):
         operation = app.get('status', {}).get('operationState', {})
         own = owns_operation(operation, revision, marker)
         if own and operation.get('phase') in ['Failed', 'Error']:
-            raise cd.DeliveryPreflightError('Argo CD selective CSMS Sync failed')
+            raise cd.DeliveryPreflightError('Argo CD approved application Sync failed')
         rollout, healthy = rollout_state(image)
         phase = rollout.get('status', {}).get('phase', 'Pending')
         if phase != last_phase:
             print('CSMS Rollout phase: ' + phase, flush=True)
             last_phase = phase
         deployment, actual = deployment_image()
-        checks = (own, operation.get('phase') == 'Succeeded', healthy, actual == image)
+        apps_ready = own and operation.get('phase') == 'Succeeded' and regular_workloads_ready(workloads or [], operation)
+        checks = (own, operation.get('phase') == 'Succeeded', healthy, actual == image, apps_ready)
         if checks != last_checks or polls % 6 == 0:
             print('Canary completion checks: own_sync=' + str(checks[0])
                   + ', sync_succeeded=' + str(checks[1]) + ', rollout_ready=' + str(checks[2])
-                  + ', deployment_image_matches=' + str(checks[3]), flush=True)
+                  + ', deployment_image_matches=' + str(checks[3])
+                  + ', application_workloads_ready=' + str(checks[4]), flush=True)
             last_checks = checks
         polls += 1
         if actual == image and (rollout.get('status', {}).get('abort') or phase == 'Degraded'):
@@ -226,7 +253,7 @@ def wait(image, revision, timeout, marker):
             # Wait until the new workload template is reflected in current RS.
             if image_is_current_rs(rollout, image):
                 raise cd.DeliveryPreflightError('Canary analysis or progress deadline aborted the update')
-        if own and operation.get('phase') == 'Succeeded' and healthy:
+        if own and operation.get('phase') == 'Succeeded' and healthy and apps_ready:
             return
         time.sleep(5)
     raise cd.DeliveryPreflightError('Canary completion deadline exceeded; inspect the last completion checks and recovery receipt')
@@ -252,14 +279,22 @@ def deliver(repo, delivery_path, timeout):
         raise cd.DeliveryPreflightError('Production changed after promotion; refusing stale Canary Sync')
     if cd.fingerprint(cd.rendered(repo, cd.CANARY)) != delivery.get('canary_fingerprint'):
         raise cd.DeliveryPreflightError('Canary policy changed after approval; refusing stale Sync')
+    workloads = []
+    if 'images' in delivery:
+        workloads = cd.application_workloads(repo, cd.candidate_images(delivery))
+        if workloads != delivery.get('workloads'):
+            raise cd.DeliveryPreflightError('Approved application workloads changed before Sync')
     try:
-        marker = sync(delivery['revision'])
+        marker = sync(delivery['revision'], workloads) if workloads else sync(delivery['revision'])
         delivery['operation_id'] = marker
         cd.save(delivery_path, delivery)
-        wait(delivery['image'], delivery['revision'], timeout, marker)
+        if workloads:
+            wait(delivery['image'], delivery['revision'], timeout, marker, workloads)
+        else:
+            wait(delivery['image'], delivery['revision'], timeout, marker)
         delivery['phase'] = 'succeeded'
         cd.save(delivery_path, delivery)
-        print('Canary passed: exact verified digest is stable at four replicas')
+        print('Delivery passed: CSMS canary is stable at four replicas; approved application workloads are synced')
     except BaseException:
         recover(repo, delivery_path)
         raise
