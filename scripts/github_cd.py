@@ -23,6 +23,74 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
+class GitHubRequestError(cd.DeliveryPreflightError):
+    """Structured, sanitized failure; never retain the response body or token."""
+    def __init__(self, status_code, reason_code='validation', fields=()):
+        self.status_code, self.reason_code = status_code, reason_code
+        reasons = {
+            'no_changes': 'no new commits between the source and base branches',
+            'duplicate_pr': 'a source pull request already exists; recheck the open PR',
+            'invalid_head': 'invalid head branch; check kim_chanju exists in the app repository',
+            'invalid_base': 'invalid base branch; check dev exists in the app repository',
+            'validation': 'request validation failed; check branch differences and PR fields',
+            'credential': 'credential rejected; check the Jenkins GitHub token',
+            'forbidden': 'access forbidden; check token permissions and organization approval',
+            'not_found': 'resource unavailable; check repository, branch and credential access',
+            'rate_limit': 'GitHub rate limit exceeded; wait for the limit to reset',
+            'conflict': 'repository state conflict; refresh branch and PR state',
+            'service': 'GitHub service unavailable; retry after checking GitHub availability',
+            'unknown': 'request rejected; inspect the HTTP status and repository state',
+        }
+        message = 'GitHub request failed: HTTP ' + str(status_code) + '; ' + reasons.get(reason_code, reasons['unknown'])
+        if fields:
+            message += '; validation fields: ' + ', '.join(fields)
+        super().__init__(message)
+
+
+def github_http_failure(error):
+    """Classify bounded JSON into fixed messages, never log arbitrary API text."""
+    try:
+        raw = error.read(16385)
+        document = json.loads(raw) if len(raw) <= 16384 else {}
+    except Exception:
+        document = {}
+    finally:
+        error.close()
+    if not isinstance(document, dict):
+        document = {}
+    errors = document.get('errors', [])
+    errors = errors[:16] if isinstance(errors, list) else []
+    messages = [document.get('message', '')] + [
+        e.get('message', '') if isinstance(e, dict) else e for e in errors]
+    messages = ' '.join(m.lower() for m in messages if isinstance(m, str))
+    code = error.code
+    reason = {401:'credential', 403:'forbidden', 404:'not_found', 409:'conflict',
+              422:'validation', 429:'rate_limit'}.get(code, 'service' if code >= 500 else 'unknown')
+    if code in (403, 429) and ('rate limit' in messages or 'secondary rate' in messages):
+        reason = 'rate_limit'
+    if code == 422:
+        if 'no commits between' in messages:
+            reason = 'no_changes'
+        elif 'pull request already exists' in messages:
+            reason = 'duplicate_pr'
+        elif any(s in messages for s in ["head sha can't be blank", 'head ref must be a branch',
+                                         'head branch is invalid', 'head is not a valid ref']):
+            reason = 'invalid_head'
+        elif 'base branch is invalid' in messages or 'base is not a valid ref' in messages:
+            reason = 'invalid_base'
+    fields = []
+    for item in errors:
+        if not isinstance(item, dict):
+            continue
+        # Only known schema metadata is printable; ignore value/message/unknown strings.
+        resource, field, validation = (item.get(k) for k in ('resource','field','code'))
+        if (resource in ('PullRequest','Issue','Commit','Reference','Repository')
+                and field in ('head','base','title','body','state','sha','ref','description')
+                and validation in ('missing','missing_field','invalid','already_exists','custom','unprocessable')):
+            fields.append(resource + '.' + field + '.' + validation)
+    return GitHubRequestError(code, reason, sorted(set(fields)))
+
+
 def api(method, path, data=None):
     if not path.startswith('/repos/' + REPOSITORY + '/'):
         raise cd.DeliveryPreflightError('GitHub requests must target the ChargeOps app repository')
@@ -39,8 +107,7 @@ def api(method, path, data=None):
         with build_opener(NoRedirect()).open(request, timeout=30) as response:
             return json.load(response)
     except HTTPError as error:
-        raise cd.DeliveryPreflightError('GitHub request failed: HTTP ' + str(error.code)
-                                       + '; check token permissions, organization approval and repository access') from None
+        raise github_http_failure(error) from None
     except URLError:
         raise cd.DeliveryPreflightError('GitHub connection failed; check the agent network and CA') from None
 
@@ -62,13 +129,20 @@ def pages(path):
     raise cd.DeliveryPreflightError('GitHub pagination exceeded the verification bound')
 
 
-def approved_merge(source):
+def approved_merge(source, allow_ancestor=False):
     """Reject direct pushes, stale heads, self/bot reviews and old approvals."""
     sha(source)
     root = '/repos/' + REPOSITORY
     ref = api('GET', root + '/git/ref/heads/dev')
-    if ref.get('object', {}).get('sha') != source:
-        raise cd.DeliveryPreflightError('This build is no longer the current dev head')
+    current = ref.get('object', {}).get('sha')
+    if current != source:
+        if not allow_ancestor:
+            raise cd.DeliveryPreflightError('This build is no longer the current dev head')
+        # Retry only a reviewed merge still contained in dev with identical apps.
+        comparison = api('GET', root + '/compare/' + source + '...' + sha(current))
+        if (comparison.get('status') not in ('ahead', 'identical')
+                or comparison.get('behind_by') != 0 or apps_tree(source) != apps_tree(current)):
+            raise cd.DeliveryPreflightError('dev changed its apps context after the reviewed merge; rebuild and reverify the current source')
     associated = list(pages(root + '/commits/' + source + '/pulls'))
     for association in associated:
         pr = api('GET', root + '/pulls/' + str(int(association['number'])))
@@ -115,7 +189,10 @@ def approved_candidate(candidate, pr_path='artifacts/pull-request.json'):
     pr = api('GET', '/repos/' + REPOSITORY + '/pulls/' + str(number))
     if not pr.get('merged') or pr.get('head', {}).get('sha') != candidate['source']:
         raise cd.DeliveryPreflightError('Verified source PR must be merged without changing its head')
-    result = approved_merge(sha(pr.get('merge_commit_sha', '')))
+    if saved.get('reused_merged_pr') is True:
+        result = approved_merge(sha(pr.get('merge_commit_sha', '')), allow_ancestor=True)
+    else:
+        result = approved_merge(sha(pr.get('merge_commit_sha', '')))
     if result['number'] != number or result['head'] != candidate['source']:
         raise cd.DeliveryPreflightError('Merged PR is not the verified source PR')
     if apps_tree(candidate['source']) != apps_tree(result['source']):
@@ -204,12 +281,37 @@ def open_pr(repo, candidate_path, receipt_path, output):
     if (cd.fingerprint(cd.rendered(repo, cd.DEV)) != candidate['development_fingerprint']
             or not cd.live_candidate(candidate['image'])):
         raise cd.DeliveryPreflightError('Dev no longer runs the verified PR candidate')
+    release_images = cd.candidate_images(candidate)
+    app_details = '\n'.join('- `' + image + '`' for repository, image in sorted(release_images.items()) if repository != cd.IMAGE)
     return source_pr(candidate['source'], output,
         'Dev integration checks passed for source `' + candidate['source'] + '`.\n\n'
         'Verified CSMS image: `' + candidate['image'] + '`.\n\n'
+        + ('Other built images for regular Ops deployment (not runtime-tested in the CSMS-only Dev environment):\n'
+           + app_details + '\n\n' if app_details else '') +
         'Review the full source diff. Approval and merge resume this same Jenkins build. '
-        'It rechecks reviews and the merged apps tree, then promotes this exact Dev-verified digest to ops. '
+        'It rechecks reviews and the merged apps tree, then promotes the pinned app images to ops; only CSMS uses Canary. '
         'Production has not been changed by this preview build.', candidate['image'])
+
+
+def reusable_merged_pr(source):
+    """Find a real reviewed merged PR for an unchanged source, never invent approval."""
+    root = '/repos/' + REPOSITORY
+    current = sha(api('GET', root + '/git/ref/heads/dev').get('object', {}).get('sha'))
+    if apps_tree(source) != apps_tree(current):
+        raise cd.DeliveryPreflightError('dev already contains this source but its apps context changed; sync the current dev source and reverify before retrying Ops')
+    for associated in pages(root + '/commits/' + sha(source) + '/pulls'):
+        pr = api('GET', root + '/pulls/' + str(int(associated['number'])))
+        head, base = pr.get('head', {}), pr.get('base', {})
+        if (not pr.get('merged') or not pr.get('merged_at') or head.get('sha') != source
+                or head.get('ref') != 'kim_chanju' or base.get('ref') != 'dev'
+                or head.get('repo', {}).get('full_name') != REPOSITORY
+                or base.get('repo', {}).get('full_name') != REPOSITORY):
+            continue
+        approval = approved_merge(sha(pr.get('merge_commit_sha', '')), allow_ancestor=True)
+        if (approval['number'] == pr['number'] and approval['head'] == source
+                and apps_tree(source) == apps_tree(approval['source'])):
+            return pr
+    raise cd.DeliveryPreflightError('dev already contains this source, but no independently approved merged PR matches its exact head; Ops retry is not authorized')
 
 
 def source_pr(source, output, body, image=None):
@@ -225,7 +327,9 @@ def source_pr(source, output, body, image=None):
     else:
         build = ''
     root = '/repos/' + REPOSITORY + '/pulls'
-    existing = list(pages(root + '?' + urlencode({'state': 'open', 'base': 'dev', 'head': 'raspberry-2jo:kim_chanju'})))
+    reused_merged_pr = False
+    listing = root + '?' + urlencode({'state': 'open', 'base': 'dev', 'head': 'raspberry-2jo:kim_chanju'})
+    existing = list(pages(listing))
     if len(existing) > 1:
         raise cd.DeliveryPreflightError('Multiple source PRs match; inspect them before continuing')
     if existing:
@@ -234,17 +338,44 @@ def source_pr(source, output, body, image=None):
             raise cd.DeliveryPreflightError('Open PR head does not match the verified source')
         pr = api('PATCH', root + '/' + str(int(pr['number'])), {'body': body})
     else:
-        pr = api('POST', root, {'title': 'chore(release): promote kim_chanju changes to dev',
-            'head': 'kim_chanju', 'base': 'dev', 'body': body})
+        try:
+            pr = api('POST', root, {'title': 'chore(release): promote kim_chanju changes to dev',
+                'head': 'kim_chanju', 'base': 'dev', 'body': body})
+        except GitHubRequestError as error:
+            if error.status_code != 422:
+                raise
+            # Another actor can create the PR between listing and POST. Recheck once;
+            # never POST repeatedly or attach a receipt to a different source head.
+            raced = list(pages(listing))
+            if len(raced) > 1:
+                raise cd.DeliveryPreflightError('Multiple source PRs match after HTTP 422; inspect them') from None
+            if raced:
+                if raced[0].get('head', {}).get('sha') != source:
+                    raise cd.DeliveryPreflightError('Open PR head changed during creation; reverify the new source') from None
+                pr = api('PATCH', root + '/' + str(int(raced[0]['number'])), {'body': body})
+            else:
+                try:
+                    comparison = api('GET', '/repos/' + REPOSITORY + '/compare/dev...' + source)
+                except cd.DeliveryPreflightError:
+                    raise error from None
+                no_changes = (isinstance(comparison, dict) and comparison.get('ahead_by') == 0
+                              and comparison.get('status') in ('identical', 'behind'))
+                if no_changes or error.reason_code == 'no_changes':
+                    pr = reusable_merged_pr(source)
+                    reused_merged_pr = True
+                else:
+                    raise error from None
     if pr.get('head', {}).get('sha') != source:
         raise cd.DeliveryPreflightError('PR head changed during creation; its new head must pass Dev checks')
     result = {'number': pr['number'], 'url': pr['html_url'], 'source': source}
+    if reused_merged_pr:
+        result['reused_merged_pr'] = True
     if build:
         result['build_url'] = build
     if image:
         result['image'] = image
     cd.save(output, result)
-    print('Source PR ready: ' + result['url'])
+    print(('Reviewed merged PR reused for retry: ' if reused_merged_pr else 'Source PR ready: ') + result['url'])
     return result
 
 

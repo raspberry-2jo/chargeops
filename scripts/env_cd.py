@@ -1,4 +1,4 @@
-"""CSMS development delivery and receipt-bound production Git promotion.
+"""CSMS development verification and receipt-bound application image promotion.
 
 No kubectl writes to ops here. Optional Canary Sync is handled by canary_cd.py.
 """
@@ -20,6 +20,10 @@ import yaml
 
 REGISTRY = 'registry.chargeops.lab:5000'
 IMAGE = REGISTRY + '/chargeops/chargeops-csms'
+APP_IMAGES = {name: REGISTRY + '/chargeops/chargeops-' + name for name in
+              ('csms', 'ai-gateway', 'chatops-bot', 'notifier', 'vcharger', 'collector')}
+IMAGE_ALIASES = {image: {image} for image in APP_IMAGES.values()}
+IMAGE_ALIASES[APP_IMAGES['collector']].add(REGISTRY + '/chargeops/collector')
 LEGACY_DEV = 'chargeops-chatops/overlays/development'
 CANARY_DEV = 'chargeops-chatops/overlays/development-canary'
 ROLLING_DEV = 'chargeops-chatops/overlays/development-rolling'
@@ -152,6 +156,70 @@ def pin_image(repo, overlay, reference):
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding='utf-8')
 
 
+def image_repository(reference):
+    repository = reference.split('@', 1)[0]
+    prefix, _, name = repository.rpartition('/')
+    return prefix + '/' + name.split(':', 1)[0]
+
+
+def workload_containers(document):
+    spec = document.get('spec', {})
+    if document['kind'] == 'Deployment':
+        return spec.get('template', {}).get('spec', {}).get('containers', [])
+    if document['kind'] == 'CronJob':
+        return spec.get('jobTemplate', {}).get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
+    return []
+
+
+def candidate_images(candidate):
+    images = candidate.get('images', {IMAGE: candidate['image']})
+    if not isinstance(images, dict) or images.get(IMAGE) != candidate['image']:
+        raise DeliveryPreflightError('Release images must include the verified CSMS digest')
+    for repository, reference in images.items():
+        if repository not in IMAGE_ALIASES or not isinstance(reference, str) or not re.fullmatch(
+                re.escape(repository) + r'@sha256:[a-f0-9]{64}', reference):
+            raise DeliveryPreflightError('Release contains an unknown or unpinned application image')
+    return images
+
+
+def pin_application_images(repo, images):
+    """Pin only selected apps in prod, including the legacy collector image alias."""
+    path = Path(repo) / PROD / 'kustomization.yaml'
+    data = yaml.safe_load(path.read_text(encoding='utf-8'))
+    documents = rendered(repo, PROD)
+    for repository, reference in images.items():
+        names = {image_repository(c['image']) for d in documents for c in workload_containers(d)
+                 if image_repository(c['image']) in IMAGE_ALIASES[repository]}
+        if not names:
+            raise DeliveryPreflightError('Selected application has no production workload: ' + repository)
+        for name in sorted(names):
+            override = next((i for i in data.get('images', []) if i['name'] == name), None)
+            if override is None:
+                override = {'name': name}
+                data.setdefault('images', []).append(override)
+            override.update(newName=repository, digest=reference.split('@', 1)[1])
+            override.pop('newTag', None)
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding='utf-8')
+
+
+def application_workloads(repo, images, overlay=CANARY):
+    """Derive bounded Sync targets from the exact approved rendered images."""
+    found, workloads = set(), []
+    for document in rendered(repo, overlay):
+        containers = {c['name']: c['image'] for c in workload_containers(document)
+                      if c['image'] in images.values()}
+        if not containers:
+            continue
+        found.update(image_repository(image) for image in containers.values())
+        if document['metadata']['name'] == 'csms' and document['kind'] == 'Deployment':
+            continue
+        workloads.append({'group': document['apiVersion'].split('/')[0], 'kind': document['kind'],
+                          'name': document['metadata']['name'], 'images': containers})
+    if found != set(images):
+        raise DeliveryPreflightError('Rendered ops workloads do not contain every approved application digest')
+    return workloads
+
+
 def ensure_clean(repo):
     if run('git', 'status', '--porcelain', cwd=repo):
         raise DeliveryPreflightError('GitOps checkout must be clean')
@@ -210,6 +278,7 @@ def candidate_check(candidate):
     if candidate.get('schema') != 1 or not re.fullmatch(
             re.escape(IMAGE) + r'@sha256:[a-f0-9]{64}', candidate.get('image', '')):
         raise DeliveryPreflightError('Invalid CSMS candidate')
+    candidate_images(candidate)
     if candidate.get('verification_mode', 'read-only') not in ['read-only', 'ocpp-fixture', 'ocpp-simulation']:
         raise DeliveryPreflightError('Unknown verification mode')
     validate_dev_overlay()
@@ -233,7 +302,7 @@ def detect_dev_overlay():
     return path
 
 
-def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False):
+def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False, build_images=None):
     validate_dev_overlay()
     if not re.fullmatch(r'build-(?:(?:kim_chanju|dev)-)?[0-9]+-[a-f0-9]{12}', tag):
         raise DeliveryPreflightError('Only a unique build tag may identify a candidate')
@@ -248,6 +317,17 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False):
                  'verification_mode': 'ocpp-simulation' if DEV == ROLLING_DEV else ('ocpp-fixture' if ocpp_fixture_test else 'read-only'),
                  'production_fingerprint': before, 'previous_production_image': prod_image,
                  'development_overlay': DEV}
+    if build_images is not None:
+        selected = set(build_images.split())
+        allowed = {image.rsplit('/', 1)[-1]: image for image in APP_IMAGES.values()}
+        if selected - allowed.keys():
+            raise DeliveryPreflightError('Unknown image selected for application delivery')
+        images = {IMAGE: candidate['image']}
+        for name in sorted(selected - {'chargeops-csms'}):
+            repository = allowed[name]
+            images[repository] = resolve_digest(repository + ':' + tag)
+        candidate['images'] = images
+        candidate_images(candidate)
     if DEV in (CANARY_DEV, ROLLING_DEV):
         previous = csms_image(repo, DEV)
         if not re.fullmatch(re.escape(IMAGE) + r'@sha256:[a-f0-9]{64}', previous) or not live_candidate(previous):
@@ -527,16 +607,22 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
         raise DeliveryPreflightError('Successful verification job is missing or replaced')
     delivery = {'schema': 1, 'candidate': fingerprint(candidate), 'image': candidate['image'],
                 'previous_image': candidate['previous_production_image'], 'phase': 'prepared', 'canary': canary}
+    if 'images' in candidate:
+        delivery['images'] = candidate_images(candidate)
     if approval:
         delivery['source_approval'] = approval
     save(delivery_path, delivery)
     dev_before = rendered(repo, DEV)
     if canary:
         stamp_gate_baseline(repo, PROD)
-    pin_image(repo, PROD, candidate['image'])
+    if 'images' in candidate:
+        pin_application_images(repo, candidate_images(candidate))
+        delivery['workloads'] = application_workloads(repo, candidate_images(candidate), CANARY if canary else PROD)
+    else:
+        pin_image(repo, PROD, candidate['image'])
     if rendered(repo, DEV) != dev_before:
         raise DeliveryPreflightError('Production promotion changed development')
-    revision = commit(repo, PROD, f'promote(ops): verified CSMS {candidate["source"][:12]}',
+    revision = commit(repo, PROD, f'promote(ops): approved apps, CSMS canary {candidate["source"][:12]}',
                       allow_gate_baseline=canary)
     delivery.update(revision=revision, phase='pending', production_fingerprint=production_fingerprint(repo))
     if canary:
@@ -568,13 +654,14 @@ def main():
     parser.add_argument('--dev-recovery', default='artifacts/dev-recovery.json')
     parser.add_argument('--tag')
     parser.add_argument('--source')
+    parser.add_argument('--images', help='Space-separated image names built and pushed by this Jenkins run')
     parser.add_argument('--timeout', type=int, help='Convergence seconds (Dev Canary verify: 900; otherwise: 600)')
     parser.add_argument('--ocpp-fixture-test', action='store_true')
     parser.add_argument('--canary', action='store_true')
     parser.add_argument('--require-approved-pr', action='store_true')
     args = parser.parse_args()
     if args.command == 'prepare':
-        prepare(args.repo, args.tag or '', args.source or '', args.candidate, args.ocpp_fixture_test, args.canary)
+        prepare(args.repo, args.tag or '', args.source or '', args.candidate, args.ocpp_fixture_test, args.canary, args.images)
     elif args.command == 'verify':
         timeout = args.timeout if args.timeout is not None else (900 if DEV == CANARY_DEV else 600)
         verify(args.repo, args.candidate, args.receipt, timeout)
