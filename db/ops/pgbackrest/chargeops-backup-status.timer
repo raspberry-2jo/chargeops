@@ -1,0 +1,10 @@
+# /etc/systemd/system/chargeops-backup-status.timer - every 10 minutes (Grafana backup panel)
+[Unit]
+Description=ChargeOps pgBackRest backup status every 10 minutes
+
+[Timer]
+OnCalendar=*:0/10
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
