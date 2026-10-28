@@ -4,6 +4,7 @@
 - 관련 WBS: 4.5 DR 훈련, 2.2 후속(AWS 경보)
 - 버전: versions.md 참고 (Terraform · AWS provider)
 - 상태: **개인 AWS 계정으로 시험 완료 (2026-10-15)** — 수동 훈련 RTO **4분 55초**, 자동 DR(사람 손 0) RTO **7분 49초**. 팀 계정은 `terraform.tfvars` 의 버킷 · 경로 · 메일만 바꾼다
+- 2026-10-28: 팀 계정 · 멘토 서버 실데이터로 **멘토 서버 mgmt 에서 실행** (복원 124초, RTO 약 2분 17초). 장부(상태 파일)는 S3 전용 버킷으로 옮김 → [`aws-dr-mentor.md`](aws-dr-mentor.md)
 - 앞 단계: [`aws-s3-backup.md`](aws-s3-backup.md) (repo2 = AWS S3 에 백업이 쌓이고 있어야 함), [`dr-restore.md`](dr-restore.md) (빈 VM 복원 — 같은 스크립트를 이번엔 AWS 안에서)
 
 ## 0. 결과 요약
@@ -42,8 +43,11 @@
 | ③ mgmt 생존 신호 → CloudWatch → SNS → 메일 | `infra/terraform/alerts` + `aws-heartbeat.py` (1분 cron) | ✅ |
 | ⑦ Budgets | 월 10달러, 실제 80 · 100% · 예측 100% | ✅ |
 | ⑤ GuardDuty → EventBridge → SNS | `enable_guardduty` (기본 끔) | 코드만 |
-| RDS 비교 실험 · DB 서브넷 그룹 (A+C) | `enable_rds` | 코드만 (다음) |
-| Slack · ECR · Grafana AWS 상황판 · Config · CloudTrail 기록 | — | 다음 (7장) |
+| RDS 비교 실험 · DB 서브넷 그룹 (A+C) | `enable_rds` | ✅ 비교 완료, DR 은 EC2 유지 → [`aws-rds-compare.md`](aws-rds-compare.md) |
+| CloudTrail 기록 · 보안 경보 4종 · Config → EventBridge · Slack | 콘솔 (황채연) | ✅ [`aws-security-alerts.md`](aws-security-alerts.md) |
+| S3 백업 감시 (Lambda · 매일 07:00) | 콘솔 · CloudShell (황채연) | ✅ [`aws-backup-watch.md`](aws-backup-watch.md) |
+| ECR 이미지 사본 | 콘솔 · Jenkinsfile | ✅ [`aws-ecr-mirror.md`](aws-ecr-mirror.md) |
+| Grafana AWS 상황판 | EC2 `chargeops-metrics` | ✅ [`aws-grafana-ec2.md`](aws-grafana-ec2.md) |
 
 ## 2. 설치 명령어
 
@@ -73,7 +77,7 @@ ssh db-01 'sudo -u postgres pgbackrest --stanza=chargeops --repo=2 info' | grep 
 ```bash
 # ===== 실행할 명령어 =====
 cd infra/terraform/dr && cp terraform.tfvars.example terraform.tfvars   # backup_bucket = "<백업 버킷>", repo_path = "/test-chargeops"(개인) | "/chargeops"(팀)
-tf init -input=false && tf validate
+tf init -input=false -backend-config=$HOME/.chargeops-dr.tfbackend && tf validate   # 장부 위치(S3) 파일: aws-dr-mentor.md 2장
 
 tf apply                                                   # 0. 상시 망 13개 (무료)
 tf apply -var build_ami=true                               # 1. 임시 서버 등 6개 → 설치 후 스스로 꺼짐 (약 3~8분)
@@ -109,7 +113,7 @@ bash -c 'source ~/.chargeops.env && python3 <저장소>/infra/terraform/alerts/a
 
 ```bash
 # ===== 실행할 명령어 =====
-cd ../dr && tf init -upgrade -input=false
+cd ../dr && tf init -upgrade -input=false -backend-config=$HOME/.chargeops-dr.tfbackend
 tf apply -var make_ami=true -var auto_dr=true              # Lambda · 역할 · 로그 · 권한 · SNS 구독 6 + SSM 엔드포인트 3 = 9개
 
 crontab -l | sed 's|^\(.*aws-heartbeat.py.*\)$|#\1|' | crontab - && date '+신호 끊음 %H:%M:%S'   # 사고 발생 가정
@@ -128,8 +132,10 @@ tf apply -var make_ami=true                                # ⚠ 자동 DR · �
 | `infra/terraform/alerts/*.tf` · `aws-heartbeat.py` | 경보 · 예산 · (선택) GuardDuty · 생존 신호 보내기 | ✅ |
 | `infra/terraform/terraform-user-policy.example.json` | Terraform 사용자 권한 (`chargeops-*` 이름만, 루트 키 없이) | ✅ |
 | `infra/terraform/*/terraform.tfvars` | `backup_bucket` · `repo_path` · `alert_email` | ✗ (.gitignore) |
-| `infra/terraform/*/terraform.tfstate` · `.terraform/` · `.build/` | 상태 · 생성물 (버킷 이름 · 리소스 ID 가 들어 있음) | ✗ — **mgmt 에만** |
+| `infra/terraform/dr/backend.tf` | 장부(상태 파일)는 S3 전용 버킷 `dr/terraform.tfstate` (버전 보관 · 잠금). 버킷 이름은 넣지 않음 | ✅ |
+| `infra/terraform/alerts/terraform.tfstate` · `*/.terraform/` · `.build/` | 상태 · 생성물 (버킷 이름 · 리소스 ID 가 들어 있음) | ✗ — **mgmt 에만** |
 | mgmt `~/.chargeops.env` | `AWS_TF_KEY_ID` · `AWS_TF_SECRET` · `AWS_HB_KEY_ID` · `AWS_HB_SECRET` = `<각자 설정>` | ✗ |
+| 멘토 서버 mgmt `~/.chargeops-dr.env` · `~/.chargeops-dr.tfbackend` | DR 전용 Terraform 키 · 장부 위치 (공용 `.chargeops.env` 와 분리) — [`aws-dr-mentor.md`](aws-dr-mentor.md) | ✗ |
 | mgmt crontab | 생존 신호 1분마다 | ✗ |
 
 단계 스위치 (`-var`): `build_ami`(임시 서버) → `make_ami`(이미지 · 설계도, 한 번 켜면 계속 true) → `drill`(수동 훈련) / `auto_dr`(자동 DR) → `enable_rds`(RDS 비교, drill 과 함께)
@@ -179,8 +185,8 @@ ssh db-01 'sudo -u postgres pgbackrest --stanza=chargeops --repo=2 info' | grep 
 
 ## 7. 다음
 
-- RDS 비교 (`enable_rds=true`) — 덤프 → RDS 복원 시간을 EC2 물리 복원과 비교 (발표 근거)
-- 보안 · 감사: CloudTrail 기록(S3), GuardDuty, Config(S3 · IAM · 보안 그룹만 — 요금) → EventBridge → SNS
-- Jenkins → ECR 이미지 사본, Grafana 에 CloudWatch 데이터 소스(새로고침 5분 — 조회 요금), SNS → Slack(#ops-alerts, 워크스페이스 승인)
+- ✅ RDS 비교 (`enable_rds=true`) — 2026-10-28 멘토 서버 실행: RDS 생성 6분 17초, DR 은 EC2 유지 → [`aws-rds-compare.md`](aws-rds-compare.md)
+- ✅ 보안 · 감사: CloudTrail 기록(S3 + CloudWatch Logs), Config(규칙 4개) → EventBridge → SNS, 보안 경보 4종. GuardDuty 는 보류 → [`aws-security-alerts.md`](aws-security-alerts.md)
+- ✅ Jenkins → ECR 이미지 사본, Grafana 에 CloudWatch 데이터 소스, SNS → Slack(#chargeops-alerts) → [`aws-ecr-mirror.md`](aws-ecr-mirror.md) · [`aws-grafana-ec2.md`](aws-grafana-ec2.md)
 - **자동 DR 을 실제 운영에서 켤지** — 사이트 인터넷만 끊겨도 발동하면 Primary 가 둘이 될 수 있음. 추천: 자동으로 서버까지 띄우고 승격(`DR_MODE=real`)은 사람이 확인 뒤
-- 팀 계정 전환: 같은 코드, `terraform.tfvars` 만 (버킷 · `/chargeops` · 메일). 개인 계정 자원은 프로젝트 끝에 `terraform destroy` (AWS 도입 보고서 8장 ④)
+- ✅ 팀 계정 전환: 같은 코드, `terraform.tfvars` 만 (버킷 · `/chargeops-mentor` · 메일). 개인 계정 자원은 프로젝트 끝에 `terraform destroy` (AWS 도입 보고서 8장 ④)
