@@ -198,8 +198,65 @@ off            4 destroyed · DR-DB 30s · SSM 엔드포인트 3m21s~4m22s · �
 | 장부 버킷 (수십 KB · 버전 보관) | 상시 | 월 1센트 미만 |
 | 훈련 · RDS 비교 | 훈련 때만 | [`aws-dr-vpc.md`](aws-dr-vpc.md) 6장 · [`aws-rds-compare.md`](aws-rds-compare.md) 6장 |
 
-## 7. 다음
+## 7. 추가 이관 (2026-10-29) — alerts 장부 · 생존 신호
 
-- 생존 신호(heartbeat)는 아직 담당자 PC mgmt 가 보낸다. 멘토 서버로 옮기려면 생존 신호 키를 어디에 둘지 팀과 정한다
-- alerts 스택 장부(`infra/terraform/alerts`)는 아직 담당자 PC mgmt 로컬에 있다. 같은 방식(S3 `alerts/` 경로 + 정책 추가)으로 옮길지 정한다
-- 프로젝트 끝: `chargeops-terraform` 키 2개 비활성화, 멘토 서버의 `~/.chargeops-dr.env` · `~/.chargeops-dr.tfbackend` · `~/aws-dr.sh` 와 담당자 PC 의 장부 사본 삭제, `aws.sh destroy` 뒤 장부 버킷 비우고 삭제
+| 항목 | 결과 |
+|---|---|
+| alerts 장부 | 담당자 PC 로컬 → S3 장부 버킷 `dr/alerts/terraform.tfstate` (기존 권한 `dr/*` 안이라 IAM 정책 변경 없음) |
+| 옮긴 뒤 확인 | 자원 8개 그대로 (`SAME`) · 담당자 PC · 멘토 서버 둘 다 plan `No changes` |
+| 생존 신호 | 담당자 PC cron → **멘토 서버 mgmt cron** (1분마다, 전용 키 파일) |
+| 이관 확인 | 담당자 PC 신호를 끈 뒤(09:58:39) 11분 동안 경보 `OK` 유지 → 멘토 서버 신호만으로 감시됨 |
+| 담당자 PC 생존 신호 키 | 비활성화 (삭제 아님) |
+
+```bash
+# ===== 실행할 명령어 (멘토 서버 mgmt, 한 줄씩) =====
+# 1) alerts 장부 위치 + 이 창에서만 쓰는 함수 (aws-dr.sh 는 DR 장부로 고정이라 따로 씀)
+sed 's#"dr/terraform.tfstate"#"dr/alerts/terraform.tfstate"#' ~/.chargeops-dr.tfbackend > ~/.chargeops-alerts.tfbackend && chmod 600 ~/.chargeops-alerts.tfbackend
+awsal() { ( set +u; source ~/.chargeops-dr.env; unset AWS_CA_BUNDLE AWS_ENDPOINT_URL AWS_ENDPOINT_URL_S3 S3_ENDPOINT_URL AWS_SESSION_TOKEN AWS_PROFILE; export TF_CLI_ARGS_init="-backend-config=$HOME/.chargeops-alerts.tfbackend" AWS_ACCESS_KEY_ID="$AWS_TF_KEY_ID" AWS_SECRET_ACCESS_KEY="$AWS_TF_SECRET" AWS_REGION=ap-northeast-2 AWS_DEFAULT_REGION=ap-northeast-2; "$@" ); }
+
+# 2) 전용 폴더에 코드 · 설정 받기 → 장부 연결
+mkdir -p ~/chargeops-alerts && cd ~/chargeops-alerts && TFB=$(sed -nE 's/^bucket *= *"(.*)"/\1/p' ~/.chargeops-alerts.tfbackend)
+awsal aws s3 cp s3://$TFB/dr/bundle/alerts-code/ . --recursive --quiet && awsal aws s3 cp s3://$TFB/dr/bundle/alerts.tfvars terraform.tfvars --quiet && awsal aws s3 cp s3://$TFB/dr/bundle/alerts.lock.hcl .terraform.lock.hcl --quiet && chmod 600 terraform.tfvars
+awsal terraform init
+awsal terraform state list | wc -l; awsal terraform plan -no-color | grep -E "will be|must be|Plan:|No changes"   # 8 · No changes
+
+# 3) 생존 신호 키: 콘솔 IAM → chargeops-heartbeat → 액세스 키 만들기 (설명 태그 mentor-mgmt, .csv 받지 않음)
+read -rp "AWS_HB_KEY_ID: " K; read -rsp "AWS_HB_SECRET: " S; echo
+( umask 077; printf 'export AWS_HB_KEY_ID=%q\nexport AWS_HB_SECRET=%q\n' "$K" "$S" > ~/.chargeops-hb.env ); unset K S
+bash -c 'source ~/.chargeops-hb.env && ~/venv/bin/python3 ~/chargeops-alerts/aws-heartbeat.py --verbose'; echo EXIT=$?   # EXIT=0
+
+# 4) cron 켜기 · 끄기 파일
+echo "* * * * * bash -c 'source ~/.chargeops-hb.env && ~/venv/bin/python3 ~/chargeops-alerts/aws-heartbeat.py' >/dev/null 2>&1 # chargeops-hb" > ~/.chargeops-hb.cron
+printf '%s\n' '#!/bin/bash' 'case "$1" in' '  on)  crontab -l 2>/dev/null | grep -q "# chargeops-hb" || ( crontab -l 2>/dev/null; cat ~/.chargeops-hb.cron ) | crontab - ;;' '  off) crontab -l 2>/dev/null | grep -v "# chargeops-hb" | crontab - ;;' 'esac' 'date; echo "heartbeat cron: $(crontab -l 2>/dev/null | grep -c "# chargeops-hb")"' > ~/aws-hb.sh && chmod 700 ~/aws-hb.sh
+~/aws-hb.sh on            # heartbeat cron: 1   (끄기: ~/aws-hb.sh off · 확인: ~/aws-hb.sh)
+~/aws-dr.sh status        # 생존 신호 경보: OK · cron: 1 줄
+```
+
+| 파일 | 위치 | 내용 | git |
+|---|---|---|---|
+| `~/.chargeops-alerts.tfbackend` | 두 mgmt | DR 과 같은 버킷 · key `dr/alerts/terraform.tfstate` | ✗ |
+| `~/chargeops-alerts/` | 멘토 서버 mgmt | alerts 코드 · tfvars · lock (사본: 장부 버킷 `dr/bundle/alerts*`) | ✗ |
+| `~/.chargeops-hb.env` | 멘토 서버 mgmt | `AWS_HB_KEY_ID` · `AWS_HB_SECRET` = `<각자 설정>` (권한 600) | ✗ |
+| `~/.chargeops-hb.cron` · `~/aws-hb.sh` | 멘토 서버 mgmt | cron 한 줄(`# chargeops-hb`) · 켜기 / 끄기 | ✗ |
+
+| 증상 | 원인 · 해결 |
+|---|---|
+| 담당자 PC plan 에 예산 `update in-place` 1개 | AWS 가 채우는 기본값(`billing_view_arn` · `metrics`)이 코드에 없음 → `lifecycle.ignore_changes` 추가 → `No changes` |
+| `~/aws-dr.sh alerts` 로 못 돌림 | `aws-dr.sh` 가 `TF_CLI_ARGS_init` 으로 DR 장부를 고정 → alerts 는 `awsal` 함수로 따로. `aws.sh` 의 alerts · heartbeat 명령은 공용 `~/.chargeops.env` 를 써서 멘토 서버에서 쓰지 않음 |
+| cron 의 `/usr/bin/python3` 에 boto3 없음 | 설치하지 않고 `~/venv/bin/python3` 를 직접 지정 |
+| GitHub 코드와 실제 적용 코드가 다름 | `force_destroy` · `ignore_changes` 를 GitHub 에 반영 (PR #83) |
+
+- 생존 신호는 **한 곳에서만** 보낸다. 두 곳이 같은 `Host=mgmt` 로 보내면 한쪽이 죽어도 경보가 안 울린다
+- `~/venv` 를 지우거나 다시 만들면 생존 신호가 멈춘다 (5분 뒤 경보)
+- 자동 DR 시연 때 신호 끊기: `~/aws-hb.sh off` → 끝나면 `~/aws-hb.sh on`
+
+## 8. 다음
+
+- 프로젝트 끝 정리 순서
+  1. `~/aws-hb.sh off`
+  2. `~/aws-dr.sh status` 로 `auto_dr=false` 확인
+  3. DR 스택 destroy — `aws.sh destroy` 가 alerts 스택도 건드리는지 먼저 확인한 뒤 실행
+  4. alerts 스택: `~/chargeops-alerts` 에서 `awsal terraform destroy` (`force_destroy` 로 생존 신호 키도 같이 삭제)
+  5. 장부 버킷 비우고 삭제 (`dr/` · `dr/alerts/` · `dr/bundle/`)
+  6. `chargeops-terraform` 키 2개 비활성화 (destroy 가 끝난 뒤)
+  7. 파일 삭제 — 멘토 서버: `~/.chargeops-dr.env` · `~/.chargeops-dr.tfbackend` · `~/aws-dr.sh` · `~/.chargeops-alerts.tfbackend` · `~/chargeops-alerts` · `~/.chargeops-hb.env` · `~/.chargeops-hb.cron` · `~/aws-hb.sh` / 담당자 PC: `~/tfstate-bak-*` · `~/tfstate-alerts-bak-*`
