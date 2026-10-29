@@ -49,7 +49,8 @@ resource "aws_cloudwatch_metric_alarm" "mgmt_heartbeat" {
 
 # 생존 신호 보내는 프로그램 전용 사용자 — 이 지표 하나만 쓸 수 있음. 키는 콘솔에서 만들어 mgmt 에서 read -rsp 로 (Terraform 상태에 키가 남지 않게)
 resource "aws_iam_user" "heartbeat" {
-  name = "chargeops-heartbeat"
+    name          = "chargeops-heartbeat"
+  force_destroy = true # 콘솔에서 만든 액세스 키가 있어도 지울 수 있게 (destroy)
 }
 
 resource "aws_iam_user_policy" "heartbeat" {
@@ -64,6 +65,10 @@ resource "aws_iam_user_policy" "heartbeat" {
 
 # ── ⑥ 예산 경보: 실제 80% · 100%, 예측 100% ─────────────────────────────────────
 resource "aws_budgets_budget" "monthly" {
+  # AWS 가 채우는 기본값(청구 화면 · 비용 계산 방식) — 코드에 없어 plan 에 매번 차이로 뜸
+  lifecycle {
+    ignore_changes = [billing_view_arn, metrics]
+  }
   name         = "chargeops-monthly"
   budget_type  = "COST"
   limit_amount = tostring(var.monthly_budget_usd)
