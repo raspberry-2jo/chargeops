@@ -1,3 +1,6 @@
 psycopg[binary]==3.3.6
 requests==2.34.2
 boto3==1.43.109
+setuptools==84.2.1
+msgpack==1.2.3
+urllib3==2.8.0

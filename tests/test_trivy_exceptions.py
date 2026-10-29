@@ -41,7 +41,7 @@ def test_new_fixed_changed_or_critical_finding_stays_blocked(change):
 
 
 def test_other_image_and_expired_exception_stay_blocked():
-    assert evaluate(image='chargeops-csms')['blocked']==1
+    assert evaluate(image='unreviewed-image')['blocked']==1
     assert evaluate(day=date(2026,11,5))['blocked']==1
 
 
@@ -69,6 +69,18 @@ def test_all_44_reviewed_rows_match_but_still_remain_visible():
     assert len(rows)==44 and result['excepted']==44 and result['blocked']==0
     assert len({item['cve'] for item in result['exceptions']})==8
     assert len(data['Results'][0]['Vulnerabilities'])==44
+
+
+@pytest.mark.parametrize('image',['chargeops-ai-gateway','chargeops-chatops-bot','chargeops-csms',
+    'chargeops-notifier','chargeops-vcharger','chargeops-collector'])
+def test_all_six_explicit_services_allow_only_reviewed_os_findings(image):
+    assert evaluate(image=image)['excepted']==1
+    assert evaluate(report(FixedVersion='patched'),image=image)['blocked']==1
+    data=report();data['Results'].append({'Type':'python-pkg','Class':'lang-pkgs',
+        'Vulnerabilities':[{'VulnerabilityID':'CVE-2026-114613','Severity':'HIGH','PkgName':'msgpack',
+            'InstalledVersion':'1.1.2','FixedVersion':'1.2.3'}]})
+    result=evaluate(data,image=image)
+    assert result['excepted']==1 and result['blocked']==1
 
 
 def test_missing_policy_is_strict_and_invalid_policy_fails(tmp_path):

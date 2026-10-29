@@ -5,7 +5,7 @@
   "exceptions": [
     {
       "cve": "CVE-2026-76642",
-      "image": "chargeops-ai-gateway",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
       "os_family": "debian",
       "os_release": "13",
       "packages": {
@@ -27,7 +27,7 @@
     },
     {
       "cve": "CVE-2026-78408",
-      "image": "chargeops-ai-gateway",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
       "os_family": "debian",
       "os_release": "13",
       "packages": {
@@ -49,7 +49,7 @@
     },
     {
       "cve": "CVE-2026-78409",
-      "image": "chargeops-ai-gateway",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
       "os_family": "debian",
       "os_release": "13",
       "packages": {
@@ -71,7 +71,7 @@
     },
     {
       "cve": "CVE-2026-78410",
-      "image": "chargeops-ai-gateway",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
       "os_family": "debian",
       "os_release": "13",
       "packages": {
@@ -93,13 +93,13 @@
     },
     {
       "cve": "CVE-2026-54369",
-      "image": "chargeops-ai-gateway",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
       "os_family": "debian",
       "os_release": "13",
       "packages": {
         "libacl1": "2.3.2-2+b1"
       },
-      "reason": "Privileged pathname ACL caller required; reviewed Python HTTP app/common DB have no ACL/subprocess calls; non-root image and SUID/SGID stripped. Residual library risk accepted temporarily.",
+      "reason": "Privileged pathname ACL caller required; reviewed Python service sources have no ACL/subprocess execution calls; non-root images and SUID/SGID stripped. Residual library risk accepted temporarily.",
       "owner": "ChargeOps maintainers",
       "reviewed_on": "2026-10-29",
       "expires_on": "2026-11-05",
@@ -107,7 +107,7 @@
     },
     {
       "cve": "CVE-2025-69720",
-      "image": "chargeops-ai-gateway",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
       "os_family": "debian",
       "os_release": "13",
       "packages": {
@@ -124,7 +124,7 @@
     },
     {
       "cve": "CVE-2026-16742",
-      "image": "chargeops-ai-gateway",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
       "os_family": "debian",
       "os_release": "13",
       "packages": {
@@ -139,7 +139,7 @@
     },
     {
       "cve": "CVE-2026-9538",
-      "image": "chargeops-ai-gateway",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
       "os_family": "debian",
       "os_release": "13",
       "packages": {

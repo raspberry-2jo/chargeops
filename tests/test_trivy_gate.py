@@ -50,7 +50,8 @@ def gate(tmp_path,monkeypatch):
             assert '--cap-drop' in args and 'ALL' in args and 'no-new-privileges' in args
             if state['failure']=='runtime':raise subprocess.CalledProcessError(1,args)
             return subprocess.CompletedProcess(args,0,stdout=json.dumps({'uid':10001,
-                'reviewed_tools_absent':True,'suid_sgid_absent':True,'runtime_imports_passed':True}))
+                'reviewed_tools_absent':True,'suid_sgid_absent':True,'runtime_imports_passed':True,
+                'service':args[-1]}))
         assert '--pull=never' in args
         mounts=[args[i+1] for i,value in enumerate(args) if value=='-v']
         assert not any('docker.sock' in mount or '/root/.docker' in mount for mount in mounts)
@@ -167,17 +168,19 @@ def enable_exception(gate,monkeypatch):
     return root,state
 
 
-def test_reviewed_exception_requires_mitigated_image_and_retains_original_report(gate,monkeypatch):
+@pytest.mark.parametrize('image',NAMES)
+def test_reviewed_exception_requires_mitigated_image_and_retains_original_report(gate,monkeypatch,image):
     root,state=enable_exception(gate,monkeypatch)
-    execute(root,[NAMES[0]])
-    g.verify(root,'21',NAMES[0],REGISTRY,'build-21')
-    original=json.loads((root/'trivy-reports/21/chargeops-ai-gateway.json').read_text())
+    execute(root,[image])
+    g.verify(root,'21',image,REGISTRY,'build-21')
+    original=json.loads((root/'trivy-reports/21'/(image+'.json')).read_text())
     assert original==state['finding_data']
     receipt=json.loads((root/'trivy-reports/21/gate.json').read_text())
-    assert receipt['reviews'][NAMES[0]]['excepted']==1
+    assert receipt['reviews'][image]['excepted']==1
+    assert receipt['reviews'][image]['runtime_evidence']['service']==image
     assert 'exceptions=1' in (root/'trivy-reports/21/summary.txt').read_text()
     (root/'security/trivy-exceptions.json').unlink()
-    with pytest.raises(g.GateError):g.verify(root,'21',NAMES[0],REGISTRY,'build-21')
+    with pytest.raises(g.GateError):g.verify(root,'21',image,REGISTRY,'build-21')
 
 
 @pytest.mark.parametrize('failure',['runtime','scanner-error','unreviewed','empty-findings'])

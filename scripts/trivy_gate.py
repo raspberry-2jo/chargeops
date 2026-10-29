@@ -66,10 +66,10 @@ def read_report(path, policy=None, image=None, audit=None):
     return review['blocked']
 
 
-def verify_runtime(identity):
+def verify_runtime(identity, service):
     result=command('docker','run','--rm','--network','none','--read-only',
                    '--cap-drop','ALL','--security-opt','no-new-privileges',
-                   '--entrypoint','python',identity,'-m','ai_gateway.exception_check',
+                   '--entrypoint','python',identity,'-m','runtime_security',service,
                    capture_output=True,text=True)
     try:
         evidence=json.loads(result.stdout)
@@ -77,7 +77,8 @@ def verify_runtime(identity):
         raise GateError('Missing runtime mitigation evidence; exception blocked') from None
     if (evidence.get('uid')!=10001 or evidence.get('reviewed_tools_absent') is not True
             or evidence.get('suid_sgid_absent') is not True
-            or evidence.get('runtime_imports_passed') is not True):
+            or evidence.get('runtime_imports_passed') is not True
+            or evidence.get('service')!=service):
         raise GateError('Runtime mitigation requirements failed; exception blocked')
     return evidence
 
@@ -166,7 +167,7 @@ def run(root,build,selected,registry,tag):
                     receipt['timings'][name]['scan_seconds']=scan(base,'image',reports/(name+'.json'),
                         '/scan/image.tar',policy,name,review)
                     if review['excepted']:
-                        review['runtime_evidence']=verify_runtime(identity)
+                        review['runtime_evidence']=verify_runtime(identity,name)
                     print(f"Trivy {name}: total={review['total']}, exceptions={review['excepted']}, blocked={review['blocked']}",flush=True)
                     for entry in review['exceptions']:
                         print(f"  ACCEPTED {entry['cve']} {entry['package']} until {entry['expires_on']}",flush=True)
@@ -220,7 +221,7 @@ def verify(root,build,selected,registry,tag):
         if item.get('report')!=name+'.json' or read_report(reports/(name+'.json'),policy,name,review):
             raise GateError('Image report is invalid or contains HIGH/CRITICAL findings')
         if review['excepted']:
-            verify_runtime(item['id'])
+            verify_runtime(item['id'],name)
     if read_report(reports/'config.json'):
         raise GateError('Configuration report contains HIGH/CRITICAL findings')
     print('Verified current build Trivy receipt and local image IDs',flush=True)

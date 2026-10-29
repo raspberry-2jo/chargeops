@@ -11,8 +11,10 @@ def load(path):
     if policy.get('schema')!=1 or not isinstance(policy.get('exceptions'),list):
         raise ValueError('Invalid Trivy exception policy')
     for entry in policy['exceptions']:
-        if (not all(entry.get(key) for key in ('cve','image','os_family','os_release',
+        if (not all(entry.get(key) for key in ('cve','os_family','os_release',
                                               'reason','owner','reviewed_on','expires_on','source'))
+                or not isinstance(entry.get('images'),list) or not entry['images']
+                or any(not isinstance(image,str) or '*' in image for image in entry['images'])
                 or not isinstance(entry.get('packages'),dict) or not entry['packages']):
             raise ValueError('Incomplete Trivy exception entry')
         if date.fromisoformat(entry['expires_on'])<=date.fromisoformat(entry['reviewed_on']):
@@ -41,7 +43,7 @@ def evaluate(data, policy, image, today=None):
                             and not finding.get('FixedVersion')
                             and os_info.get('Family')==entry['os_family']
                             and str(os_info.get('Name','')).split('.')[0]==entry['os_release']
-                            and image==entry['image'] and finding.get('VulnerabilityID')==entry['cve']
+                            and image in entry['images'] and finding.get('VulnerabilityID')==entry['cve']
                             and finding.get('PkgName') in entry['packages']
                             and finding.get('InstalledVersion')==entry['packages'][finding['PkgName']]
                             and date.fromisoformat(entry['reviewed_on'])<=today<date.fromisoformat(entry['expires_on'])):
