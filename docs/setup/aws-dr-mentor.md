@@ -4,6 +4,7 @@
 - 관련 WBS: 4.5 DR 훈련
 - 버전: versions.md 참고 (멘토 서버 mgmt: Terraform 1.17.0 · AWS CLI 2.38 · AWS provider 6.69.1 · archive 2.8.1)
 - 상태: **2026-10-28 멘토 서버 mgmt 에서 DR 훈련 · RDS 비교 실행 완료** — 복원 124초, RTO 약 2분 17초
+- 추가: **2026-10-29 멘토 서버에서 자동 DR 시험 완료 (사람 손 0)** — 신호 끊김부터 복원 끝까지 16분 35초 → 8장
 - 관련: [`aws-dr-vpc.md`](aws-dr-vpc.md) (DR VPC · `aws.sh` 코드), [`aws-rds-compare.md`](aws-rds-compare.md) (RDS 비교), [`aws-s3-backup.md`](aws-s3-backup.md) (repo2 = S3 백업), [`aws-backup-watch.md`](aws-backup-watch.md) (백업 감시)
 
 ## 0. 결과 요약
@@ -250,7 +251,41 @@ printf '%s\n' '#!/bin/bash' 'case "$1" in' '  on)  crontab -l 2>/dev/null | grep
 - `~/venv` 를 지우거나 다시 만들면 생존 신호가 멈춘다 (5분 뒤 경보)
 - 자동 DR 시연 때 신호 끊기: `~/aws-hb.sh off` → 끝나면 `~/aws-hb.sh on`
 
-## 8. 다음
+## 8. 자동 DR 시험 (2026-10-29) — 팀 계정 · 멘토 서버
+
+생존 신호를 일부러 끊어, 사람이 명령을 치지 않아도 DR-DB 가 뜨고 S3 백업으로 복원되는지 팀 계정에서 확인했다. 앞선 시험(10/15)은 개인 계정이었다 → [`aws-dr-vpc.md`](aws-dr-vpc.md) 2-4
+
+흐름: 생존 신호 끊김 → CloudWatch 경보 `chargeops-mgmt-heartbeat` (1분 × 5개 연속 누락) → SNS `chargeops-alerts` → Lambda `chargeops-auto-dr` → 서버 설계도(Launch Template)로 DR-DB 1대 → 첫 부팅에 S3 복원 (훈련 모드)
+
+| 시각 (KST) | 한 일 | 결과 |
+|---|---|---|
+| 19:02:45 | `~/aws-dr.sh auto-dr on` | Plan 9 to add → 적용 71초 (Lambda · 역할 · 정책 · 로그 · 권한 · SNS 구독 + SSM 엔드포인트 3) |
+| 19:06:12 | `~/aws-hb.sh off` | `heartbeat cron: 0` — 시험 시작 |
+| 19:17:31 | (자동) 경보 `ALARM` | Slack #chargeops-alerts · 메일 |
+| 19:17:33 | (자동) Lambda | `자동 DR 발동: i-…` → DR-DB 생성 · 메일 "[ChargeOps] 자동 DR 발동 (훈련 모드)" |
+| 19:18:29 | (자동) DR-DB 복원 시작 | S3 repo2 · 10/29 03:40 증분 백업 |
+| 19:22:47 | (자동) 복원 끝 | 종료 코드 0 |
+| 19:25:48 | `~/aws-hb.sh on` | `heartbeat cron: 1` |
+| 정리 | 콘솔에서 Lambda 가 띄운 DR-DB 종료 → `~/aws-dr.sh auto-dr off` (19:27:52) | 9 destroyed · 221초 → `status` No changes |
+
+| 항목 | 결과 |
+|---|---|
+| 감지 (신호 끊김 → 경보) | 11분 19초 |
+| 경보 → DR-DB 생성 | 2초 |
+| 복원 | 패키지 2초 · 저장소 확인 0초 · 내려받기 43초 · 재생 · 승격 214초 = **260초** |
+| 전체 (사람 손 0) | 신호 끊김 → 복원 끝 **16분 35초** |
+| RPO | 약 31초 (되살린 마지막 트랜잭션 19:22:15 · 확인 19:22:46) |
+| 데이터 | 충전기 541,292 · 상태 이력 1,505,650 (19:22 기준) |
+| 정리 뒤 | `auto_dr=false` · 시간당 요금 없음 · 생존 신호 경보 OK · No changes |
+
+- 감지가 설정(5분)보다 두 배 넘게 걸렸다. 전체 16분 35초 중 3분의 2 가 감지 시간이다
+- Lambda 는 두 번 실행됐다. 두 번째는 자기가 보낸 "자동 DR 발동" 알림을 받은 것이고, 경보 메시지가 아니어서 무시했다 (`auto_dr.py` 안전장치 ①)
+- 재생 · 승격 214초는 같은 날 오후 수동 훈련(149초)보다 길다. 백업(03:40) 뒤 시간이 지날수록 다시 적용할 WAL 이 늘어난다 (10/28 과 같은 경향)
+- Lambda 가 띄운 DR-DB 는 Terraform 밖 자원이라 `auto-dr off` 로 지워지지 않는다 → 콘솔에서 태그 `LaunchedBy=auto-dr-lambda` 서버를 직접 종료
+- `aws.sh` 안내 문구의 `aws.sh heartbeat on/off` 는 공용 `~/.chargeops.env` 를 읽는다 → 멘토 서버에서는 `~/aws-hb.sh on/off` 만 쓴다
+- 신호를 끊으면 팀 Slack 에 경보가 가므로 시험 전에 공지한다
+
+## 9. 다음
 
 - 프로젝트 끝 정리 순서
   1. `~/aws-hb.sh off`
