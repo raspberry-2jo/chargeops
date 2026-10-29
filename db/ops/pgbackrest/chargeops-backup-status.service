@@ -1,0 +1,11 @@
+# /etc/systemd/system/chargeops-backup-status.service - save latest pgBackRest backup per repo to the DB (called by the timer)
+[Unit]
+Description=ChargeOps pgBackRest backup status to DB (Primary only)
+After=postgresql-17.service patroni.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=postgres
+ExecStart=/usr/local/sbin/chargeops-backup-status.py
+Nice=10

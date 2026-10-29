@@ -2371,6 +2371,210 @@
               "legendFormat": "리셋 {{type}} {{result}}"
             }
           ]
+        },
+        {
+          "id": 49,
+          "type": "table",
+          "title": "백업 저장소 상태",
+          "description": "pgBackRest repo별 마지막 백업. repo1 = MinIO(s3.chargeops.lab), repo2 = AWS S3. 마지막 성공: 백업이 끝난 뒤 지난 시간, 매일 03:40 정기 백업이라 26시간을 넘으면 빨강. 기준 전체: 이 차등 백업이 기대는 전체 백업 날짜. 상태: 백업 오류 = pgBackRest가 그 백업에 오류 표시, 저장소 오류 = pgbackrest info 자체 실패. 점검: DB 서버 타이머(chargeops-backup-status, 10분마다)가 이 표를 마지막으로 갱신한 뒤 지난 시간, 20분 넘으면 노랑(타이머 멈춤 의심).",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "chargeops-db"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 59,
+            "w": 24,
+            "h": 5
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "chargeops-db"
+              },
+              "editorMode": "code",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT repo_name AS \"저장소\",\n round((extract(epoch FROM now() - last_stop) / 3600)::numeric, 1) AS \"마지막 성공\",\n last_type AS \"종류\",\n to_char(last_stop, 'MM-DD HH24:MI') AS \"끝난 시각\",\n CASE WHEN last_label ~ '^[0-9]{8}-' THEN to_char(to_date(left(last_label, 8), 'YYYYMMDD'), 'MM-DD') END AS \"기준 전체\",\n round(size_bytes / 1048576.0) AS \"크기\",\n CASE WHEN repo_status IS NULL THEN '모름' WHEN repo_status <> 'ok' THEN '저장소 오류' WHEN last_error THEN '백업 오류' ELSE '정상' END AS \"상태\",\n round(extract(epoch FROM now() - checked_at) / 60) AS \"점검\"\nFROM backup_repo_status ORDER BY repo"
+            }
+          ],
+          "options": {
+            "showHeader": true,
+            "cellHeight": "sm",
+            "footer": {
+              "show": false
+            }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "noValue": "-",
+              "custom": {
+                "align": "left"
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "마지막 성공"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "suffix:시간 전"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "#3FB950",
+                          "value": null
+                        },
+                        {
+                          "color": "#F85149",
+                          "value": 26
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-background",
+                      "mode": "basic"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "기준 전체"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#9AA1AC"
+                    }
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "크기"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "suffix: MB"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.align",
+                    "value": "right"
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "상태"
+                },
+                "properties": [
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  },
+                  {
+                    "id": "mappings",
+                    "value": [
+                      {
+                        "type": "value",
+                        "options": {
+                          "정상": {
+                            "color": "#3FB950",
+                            "index": 0
+                          },
+                          "백업 오류": {
+                            "color": "#F85149",
+                            "index": 1
+                          },
+                          "저장소 오류": {
+                            "color": "#F85149",
+                            "index": 2
+                          },
+                          "모름": {
+                            "color": "#6B7280",
+                            "index": 3
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "점검"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "suffix:분 전"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "#9AA1AC",
+                          "value": null
+                        },
+                        {
+                          "color": "#D29922",
+                          "value": 20
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.cellOptions",
+                    "value": {
+                      "type": "color-text"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
         }
       ]
     },
