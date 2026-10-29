@@ -1,6 +1,7 @@
 # AI Gateway 빌드 도구 제거 실험
 
-테스트 브랜치: `codex/ai-gateway-runtime-cleanup`. 운영 검증 전 `kim_chanju`로 병합하지 않습니다.
+원본 테스트 브랜치: `codex/ai-gateway-runtime-cleanup`. 사용자 요청으로 `kim_chanju`에도 반영했습니다.
+실제 이미지 실행·Trivy 재검사는 아직 완료되지 않았으며, 아래 Agent 검증과 Jenkins 품질 게이트 결과를 확인해야 합니다.
 
 ## 변경
 
@@ -102,7 +103,7 @@ Dockerfile 실행 순서를 확인하는 모의 검증입니다. 모의 검증�
 2. 실제 컨테이너 HTTP 헬스체크 통과.
 3. 승인된 Dev 환경에서 사용하는 업무 API·DB·LLM 기능 검증.
 4. before/after Trivy에서 해당 CVE·패키지 경로 비교. 다른 HIGH/CRITICAL도 함께 검토.
-5. 위 결과를 검토한 뒤에만 kim_chanju에 병합하고 기존 CI·Trivy gate로 진행.
+5. kim_chanju의 기존 CI·Trivy gate 결과를 확인하고, 실제 이미지·업무 기능 검증 전에는 운영 적용 완료로 판단하지 않음.
 
 근거:
 - https://pypi.org/project/setuptools/84.2.1/
