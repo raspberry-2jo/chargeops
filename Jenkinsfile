@@ -137,7 +137,7 @@ pipeline {
             echo 'First build or BUILD_ALL_IMAGES=true: building all six images.'
           } else {
             changedFiles.each { path ->
-              if (path == 'Jenkinsfile' || path == 'scripts/ci.py' || path == 'scripts/trivy_gate.py' || path == env.APP_ROOT + '/.dockerignore') {
+              if (path == 'Jenkinsfile' || path == 'scripts/ci.py' || path == 'scripts/trivy_gate.py' || path == 'scripts/trivy_exceptions.py' || path.startsWith('security/') || path == env.APP_ROOT + '/.dockerignore') {
                 selected.addAll(allImages)
               } else if (path == 'requirements-dev.txt' || path == 'pytest.ini' || path.startsWith('scripts/') ||
                          path.startsWith('tests/') || path.contains('/tests/') || path.contains('/test_')) {
@@ -245,6 +245,14 @@ pipeline {
         always {
           archiveArtifacts artifacts: "trivy-reports/${env.BUILD_NUMBER}/*.json",
             allowEmptyArchive: true, fingerprint: true
+          archiveArtifacts artifacts: "trivy-reports/${env.BUILD_NUMBER}/summary.txt",
+            allowEmptyArchive: true
+          script {
+            def summaryPath = "trivy-reports/${env.BUILD_NUMBER}/summary.txt"
+            if (fileExists(summaryPath)) {
+              currentBuild.description = readFile(summaryPath).trim()
+            }
+          }
         }
       }
     }

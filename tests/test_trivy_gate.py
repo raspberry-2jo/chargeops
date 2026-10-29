@@ -1,5 +1,6 @@
 """Exercise the real gate with deterministic Docker/Git adapters; no CVE DB needed."""
 import hashlib
+from datetime import date
 import importlib.util
 import io
 import json
@@ -44,6 +45,12 @@ def gate(tmp_path,monkeypatch):
             if state['failure']=='save':raise subprocess.CalledProcessError(1,args)
             return subprocess.CompletedProcess(args,0)
         assert args[:2]==('docker','run')
+        if '--entrypoint' in args:
+            assert '--read-only' in args and '--network' in args and 'none' in args
+            assert '--cap-drop' in args and 'ALL' in args and 'no-new-privileges' in args
+            if state['failure']=='runtime':raise subprocess.CalledProcessError(1,args)
+            return subprocess.CompletedProcess(args,0,stdout=json.dumps({'uid':10001,
+                'reviewed_tools_absent':True,'suid_sgid_absent':True,'runtime_imports_passed':True}))
         assert '--pull=never' in args
         mounts=[args[i+1] for i,value in enumerate(args) if value=='-v']
         assert not any('docker.sock' in mount or '/root/.docker' in mount for mount in mounts)
@@ -61,11 +68,14 @@ def gate(tmp_path,monkeypatch):
         if state['failure']=='malformed':
             report.write_text('{broken')
             return subprocess.CompletedProcess(args,0)
+        if mode=='image' and state.get('finding_data'):
+            report.write_text(json.dumps(state['finding_data']))
+            raise subprocess.CalledProcessError(state.get('scanner_exit',42),args)
         finding=(mode=='image' and state['failure'] in ('cve','silent_cve')) or (mode=='config' and state['failure']=='config')
         key='Vulnerabilities' if mode=='image' else 'Misconfigurations'
         report.write_text(json.dumps({'SchemaVersion':2,'ArtifactName':'fixture',
             'Results':[{key:[{'Severity':'HIGH'}] if finding else []}]}))
-        if finding and state['failure']!='silent_cve':raise subprocess.CalledProcessError(1,args)
+        if finding and state['failure']!='silent_cve':raise subprocess.CalledProcessError(42,args)
         return subprocess.CompletedProcess(args,0)
     monkeypatch.setattr(g,'command',fake)
     return tmp_path,state
@@ -89,7 +99,7 @@ def test_all_selected_images_and_config_are_scanned_before_receipt_allows_push(g
     assert all('push' not in a for a in state['calls'])
     for args in scans:
         assert args[args.index('--severity')+1]=='HIGH,CRITICAL'
-        assert args[args.index('--exit-code')+1]=='1'
+        assert args[args.index('--exit-code')+1]=='42'
 
 
 @pytest.mark.parametrize('failure',['cve','config','save','download','tool','missing_report','malformed','silent_cve'])
@@ -142,3 +152,41 @@ def test_unknown_empty_or_duplicate_images_rejected(gate,names):
     root,state=gate
     with pytest.raises(g.GateError):g.run(root,'21',names,REGISTRY,'build-21')
     assert not state['calls']
+
+
+def enable_exception(gate,monkeypatch):
+    root,state=gate
+    (root/'security').mkdir()
+    (root/'security/trivy-exceptions.json').write_text((ROOT/'security/trivy-exceptions.json').read_text())
+    evaluate=g.exceptions.evaluate
+    monkeypatch.setattr(g.exceptions,'evaluate',lambda *a,**kw:evaluate(*a,**kw,today=date(2026,10,29)))
+    state['finding_data']={'SchemaVersion':2,'ArtifactName':'fixture',
+        'Metadata':{'OS':{'Family':'debian','Name':'13.7'}},'Results':[{'Class':'os-pkgs','Type':'debian',
+        'Vulnerabilities':[{'VulnerabilityID':'CVE-2026-76642','PkgName':'bsdutils',
+            'InstalledVersion':'1:2.41.5-0+deb13u1','Severity':'HIGH'}]}]}
+    return root,state
+
+
+def test_reviewed_exception_requires_mitigated_image_and_retains_original_report(gate,monkeypatch):
+    root,state=enable_exception(gate,monkeypatch)
+    execute(root,[NAMES[0]])
+    g.verify(root,'21',NAMES[0],REGISTRY,'build-21')
+    original=json.loads((root/'trivy-reports/21/chargeops-ai-gateway.json').read_text())
+    assert original==state['finding_data']
+    receipt=json.loads((root/'trivy-reports/21/gate.json').read_text())
+    assert receipt['reviews'][NAMES[0]]['excepted']==1
+    assert 'exceptions=1' in (root/'trivy-reports/21/summary.txt').read_text()
+    (root/'security/trivy-exceptions.json').unlink()
+    with pytest.raises(g.GateError):g.verify(root,'21',NAMES[0],REGISTRY,'build-21')
+
+
+@pytest.mark.parametrize('failure',['runtime','scanner-error','unreviewed','empty-findings'])
+def test_exception_cannot_turn_runtime_error_scanner_error_or_new_cve_into_success(gate,monkeypatch,failure):
+    root,state=enable_exception(gate,monkeypatch)
+    if failure=='runtime':state['failure']='runtime'
+    if failure=='scanner-error':state['scanner_exit']=1
+    if failure=='unreviewed':
+        state['finding_data']['Results'][0]['Vulnerabilities'].append({'Severity':'HIGH','VulnerabilityID':'new'})
+    if failure=='empty-findings':state['finding_data']['Results'][0]['Vulnerabilities']=[]
+    with pytest.raises(g.GateError):execute(root,[NAMES[0]])
+    assert json.loads((root/'trivy-reports/21/gate.json').read_text())['status']=='failed'

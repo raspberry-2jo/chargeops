@@ -14,10 +14,12 @@ COPY ai-gateway/ ./ai_gateway/
 COPY common/ ./common/
 
 RUN useradd --uid 10001 --create-home --no-log-init app
+RUN python -m ai_gateway.exception_check --harden
 USER 10001:10001
 
 # Check the final runtime after removing build tools, as the actual service user.
 RUN python -m ai_gateway.runtime_check
+RUN python -m ai_gateway.exception_check
 
 EXPOSE 8000
 CMD ["python", "-m", "uvicorn", "ai_gateway.health:app", "--host", "0.0.0.0", "--port", "8000"]

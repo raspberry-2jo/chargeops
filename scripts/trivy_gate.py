@@ -16,6 +16,7 @@ import tempfile
 import time
 
 import ci
+import trivy_exceptions as exceptions
 
 SCANNER = 'aquasec/trivy:0.76.1'
 
@@ -50,7 +51,7 @@ def references(root, selected, registry, tag):
     return {name:f'{registry}/{name}:{tag}' for name in names}
 
 
-def read_report(path):
+def read_report(path, policy=None, image=None, audit=None):
     try:
         data=json.loads(path.read_text(encoding='utf-8'))
     except (OSError,ValueError):
@@ -59,13 +60,26 @@ def read_report(path):
             or not isinstance(data.get('ArtifactName'),str) or not data['ArtifactName']
             or (data.get('Results') is not None and not isinstance(data['Results'],list))):
         raise GateError('Trivy JSON report has an unexpected schema: '+path.name)
-    findings=0
-    for result in data.get('Results') or []:
-        for key in ('Vulnerabilities','Misconfigurations'):
-            for item in result.get(key) or []:
-                if item.get('Severity') in ('HIGH','CRITICAL'):
-                    findings+=1
-    return findings
+    review=exceptions.evaluate(data,policy or {'exceptions':[]},image)
+    if audit is not None:
+        audit.update(review)
+    return review['blocked']
+
+
+def verify_runtime(identity):
+    result=command('docker','run','--rm','--network','none','--read-only',
+                   '--cap-drop','ALL','--security-opt','no-new-privileges',
+                   '--entrypoint','python',identity,'-m','ai_gateway.exception_check',
+                   capture_output=True,text=True)
+    try:
+        evidence=json.loads(result.stdout)
+    except (ValueError,TypeError):
+        raise GateError('Missing runtime mitigation evidence; exception blocked') from None
+    if (evidence.get('uid')!=10001 or evidence.get('reviewed_tools_absent') is not True
+            or evidence.get('suid_sgid_absent') is not True
+            or evidence.get('runtime_imports_passed') is not True):
+        raise GateError('Runtime mitigation requirements failed; exception blocked')
+    return evidence
 
 
 def scanner_command(scratch, cache, reports):
@@ -74,19 +88,28 @@ def scanner_command(scratch, cache, reports):
             '-v',f'{reports}:/reports:Z',SCANNER]
 
 
-def scan(base, mode, report, target):
+def scan(base, mode, report, target, policy=None, image=None, audit=None):
     args=base+[mode]
     if mode=='image':args+=['--input',target,'--scanners','vuln']
-    args+=['--severity','HIGH,CRITICAL','--exit-code','1','--format','json',
+    args+=['--severity','HIGH,CRITICAL','--exit-code','42','--format','json',
            '--config','','--ignorefile','/scan/no-ignores','--output','/reports/'+report.name,'--no-progress']
     if mode=='config':args.append(target)
     started=time.monotonic()
-    # Both a finding exit and a scanner error are failures. Preserve emitted JSON.
+    finding_exit=False
+    # 42 means findings only; other nonzero exits remain scanner failures.
     try:
         command(*args)
     except subprocess.CalledProcessError as error:
-        raise GateError(f'Trivy {mode} failed (exit {error.returncode}); publication blocked') from None
-    if read_report(report):
+        if error.returncode!=42:
+            raise GateError(f'Trivy {mode} failed (exit {error.returncode}); publication blocked') from None
+        finding_exit=True
+    review={}
+    blocked=read_report(report,policy,image,review)
+    if audit is not None:
+        audit.update(review)
+    if finding_exit and not review['total']:
+        raise GateError('Trivy finding exit without valid findings; publication blocked')
+    if blocked:
         raise GateError('HIGH/CRITICAL findings remain in '+report.name)
     return round(time.monotonic()-started,3)
 
@@ -111,6 +134,9 @@ def run(root,build,selected,registry,tag):
     receipt_path.write_text(json.dumps(receipt,indent=2),encoding='utf-8')
     started=time.monotonic()
     try:
+        policy=exceptions.load(root/'security/trivy-exceptions.json')
+        receipt['exception_policy_sha256']=exceptions.digest(policy)
+        receipt['reviews']={}
         cache.mkdir(parents=True,exist_ok=True)
         refs=references(root,selected,registry,tag)
         receipt['source']=source_commit(root)
@@ -135,7 +161,15 @@ def run(root,build,selected,registry,tag):
                         raise GateError('Docker save did not produce a nonempty archive')
                     receipt['timings'][name]={'docker_save_seconds':round(time.monotonic()-saved,3),
                                             'tar_bytes':archive.stat().st_size}
-                    receipt['timings'][name]['scan_seconds']=scan(base,'image',reports/(name+'.json'),'/scan/image.tar')
+                    review={}
+                    receipt['reviews'][name]=review
+                    receipt['timings'][name]['scan_seconds']=scan(base,'image',reports/(name+'.json'),
+                        '/scan/image.tar',policy,name,review)
+                    if review['excepted']:
+                        review['runtime_evidence']=verify_runtime(identity)
+                    print(f"Trivy {name}: total={review['total']}, exceptions={review['excepted']}, blocked={review['blocked']}",flush=True)
+                    for entry in review['exceptions']:
+                        print(f"  ACCEPTED {entry['cve']} {entry['package']} until {entry['expires_on']}",flush=True)
                 finally:
                     archive.unlink(missing_ok=True)
                 if image_id(reference)!=identity:
@@ -154,13 +188,17 @@ def run(root,build,selected,registry,tag):
             if source_commit(root)!=receipt['source']:
                 raise GateError('Checkout changed during scanning')
         receipt['status']='passed'
-    except (GateError,OSError,subprocess.CalledProcessError,tarfile.TarError) as error:
+    except (GateError,OSError,ValueError,subprocess.CalledProcessError,tarfile.TarError) as error:
         receipt['error']=str(error) if isinstance(error,GateError) else type(error).__name__
         raise GateError('Trivy gate failed; see build reports and console. '+receipt['error']) from None
     finally:
         receipt['timings']['total_seconds']=round(time.monotonic()-started,3)
         receipt_path.write_text(json.dumps(receipt,indent=2),encoding='utf-8')
-    print('Trivy gate passed: all selected local images and tracked configuration; publication may proceed',flush=True)
+        accepted=sum(item.get('excepted',0) for item in receipt.get('reviews',{}).values())
+        unique={entry['cve'] for item in receipt.get('reviews',{}).values() for entry in item.get('exceptions',[])}
+        summary=f"Trivy {receipt['status'].upper()}: exceptions={accepted} findings / {len(unique)} CVEs"
+        (reports/'summary.txt').write_text(summary+'\n',encoding='utf-8')
+    print(summary+'; all selected images and configuration passed policy; publication may proceed',flush=True)
 
 
 def verify(root,build,selected,registry,tag):
@@ -168,16 +206,21 @@ def verify(root,build,selected,registry,tag):
     try:receipt=json.loads((reports/'gate.json').read_text(encoding='utf-8'))
     except (OSError,ValueError):raise GateError('Missing valid Trivy gate receipt; publication blocked') from None
     refs=references(root,selected,registry,tag)
+    policy=exceptions.load(root/'security/trivy-exceptions.json')
     if (receipt.get('schema')!=1 or receipt.get('status')!='passed' or receipt.get('build')!=build
             or receipt.get('scanner')!=SCANNER or receipt.get('source')!=source_commit(root)
-            or set(receipt.get('images',{}))!=set(refs)):
+            or set(receipt.get('images',{}))!=set(refs)
+            or receipt.get('exception_policy_sha256')!=exceptions.digest(policy)):
         raise GateError('Trivy gate did not pass for this exact build/source/image selection')
     for name,reference in refs.items():
         item=receipt['images'][name]
         if item.get('reference')!=reference or item.get('id')!=image_id(reference):
             raise GateError('Image differs from the scanned image; publication blocked')
-        if item.get('report')!=name+'.json' or read_report(reports/(name+'.json')):
+        review={}
+        if item.get('report')!=name+'.json' or read_report(reports/(name+'.json'),policy,name,review):
             raise GateError('Image report is invalid or contains HIGH/CRITICAL findings')
+        if review['excepted']:
+            verify_runtime(item['id'])
     if read_report(reports/'config.json'):
         raise GateError('Configuration report contains HIGH/CRITICAL findings')
     print('Verified current build Trivy receipt and local image IDs',flush=True)
@@ -196,7 +239,7 @@ def main():
     signal.signal(signal.SIGTERM,interrupted)
     try:
         (run if args.command=='run' else verify)(Path.cwd().resolve(),args.build_number,args.images,args.registry,args.tag)
-    except (GateError,OSError,subprocess.CalledProcessError) as error:
+    except (GateError,OSError,ValueError,subprocess.CalledProcessError) as error:
         print(str(error),flush=True)
         return 1
     except KeyboardInterrupt:

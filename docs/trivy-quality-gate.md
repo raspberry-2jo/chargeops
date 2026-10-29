@@ -15,8 +15,9 @@ Checkout → Test / Dev 준비 상태 검사 → Docker Build(선택 이미지 �
 - 대상: BUILD_IMAGES에 선택된 6개 서비스 중 모든 빌드 이미지. IMAGE_REF 하나만 검사하지 않습니다.
 - 이미지: 로컬 이미지를 하나씩 `docker save` → Trivy `image --input`으로 검사합니다.
 - 설정: 현재 checkout HEAD의 Git 추적 파일을 `git archive`로 준비해 Trivy config를 실행합니다.
-- HIGH/CRITICAL 하나라도 있거나 실행·DB 다운로드·TLS·이미지 export·JSON 생성/검증이 실패하면 Stage가 실패합니다.
-- 예외 허용·ignore-unfixed·실패 무시·스캔 비활성화 파라미터를 추가하지 않았습니다. 저장소의 기본 trivy.yaml 로딩은 끄고, pipeline이 생성한 빈 ignore 파일을 명시합니다.
+- 승인된 기한부 예외 이외의 HIGH/CRITICAL, 실행·DB 다운로드·TLS·이미지 export·JSON 생성/검증 실패는 Stage를 실패시킵니다.
+- 예외는 security/trivy-exceptions.json의 정확한 이미지·OS·CVE·패키지·버전과 만료일에 한정합니다. 자세한 근거와 완화 검증은 [Debian 검토 기록](security/trivy-debian-review-2026-10-29.md)에 있습니다.
+- ignore-unfixed·실패 무시·스캔 비활성화는 사용하지 않습니다. 기본 trivy.yaml 로딩은 끄고 빈 ignore 파일을 명시해 원본 JSON을 보존합니다. Trivy findings 전용 exit42를 정책 평가하며, 스캐너 오류 exit1 등은 항상 차단합니다.
 - 첫 실패에서 멈춥니다. 이미지 검사에서 실패하면 아직 실행하지 않은 이미지·config 보고서가 없을 수 있습니다.
 - Registry Push와 ECR Push 앞에서 성공 receipt, source SHA, 선택 이미지 목록, tag, 로컬 image ID 및 JSON을 다시 확인합니다. Restart from Stage로 검사를 건너뛸 수 없습니다.
 - ECR mirror 자체의 기존 UNSTABLE 정책은 유지하지만 Trivy 검증은 catchError 밖에서 실행하여 반드시 FAILURE로 차단합니다.
@@ -29,6 +30,7 @@ Jenkins build artifacts:
 trivy-reports/<BUILD_NUMBER>/chargeops-<서비스>.json
 trivy-reports/<BUILD_NUMBER>/config.json
 trivy-reports/<BUILD_NUMBER>/gate.json
+trivy-reports/<BUILD_NUMBER>/summary.txt
 ```
 
 Stage의 post/always가 JSON을 archive합니다. allowEmptyArchive=true는 실행 오류 때 보고서가 없을 가능성을 처리할 뿐 성공을 의미하지 않습니다. gate.json에 성공/실패와 전체 시간·이미지별 docker save 시간·tar 크기·scan 시간을 기록합니다. 같은 build를 재시작해도 이전 성공 receipt를 먼저 무효화합니다.
