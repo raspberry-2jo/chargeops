@@ -31,6 +31,7 @@ import math
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.parse
 
@@ -116,10 +117,13 @@ def fetch(op: str, params: dict, page: int, rows: int) -> tuple[int, list[dict],
         except ApiError:
             raise                                                   # 다시 해도 같은 결과 → 호출만 낭비
         except (requests.RequestException, ValueError) as e:
+            why = e.__class__.__name__
+            if isinstance(e, requests.HTTPError) and e.response is not None:
+                why += f" {e.response.status_code}"              # 예: HTTPError 503
             if attempt == len(RETRY_WAITS):
-                raise RuntimeError(f"API 연결 실패 ({attempt + 1}번 시도): {e.__class__.__name__}") from e
+                raise RuntimeError(f"API 연결 실패 ({attempt + 1}번 시도): {why}") from e
             wait = RETRY_WAITS[attempt]
-            log(f"    ... {page}쪽 받기 실패({e.__class__.__name__}), {wait}초 뒤 다시 시도")
+            log(f"    ... {page}쪽 받기 실패({why}), {wait}초 뒤 다시 시도")
             time.sleep(wait)
     raise AssertionError("unreachable")
 
@@ -212,26 +216,34 @@ def cmd_load(mode: str, args) -> int:
     run_id = logc.execute("""INSERT INTO collect_log (operation, region_code, period_min)
                              VALUES (%s, %s, %s) RETURNING run_id""", (op, zcode or None, period)).fetchone()[0]
     calls, fetched, first_key, extra_fields = 0, 0, None, set()
+    # v1.2: 공공 API 를 끝까지 받은 뒤에 DB 트랜잭션을 연다. 예전에는 트랜잭션(TRUNCATE 잠금 포함)을 연 채로
+    #       API 응답을 기다려서, API 가 느린 회차(10/29 09:30 69초)에 DB 연결 1개를 1분 넘게 붙잡았다.
+    #       받은 행은 임시 파일에 두고(전국 수집도 메모리 작게) DB 에는 한 번에 넣는다.
+    buf = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
     try:
-        with db_connect() as conn:                                  # 한 회차 = 한 트랜잭션 (중간 실패 → 전부 되돌림)
+        page, pages = 1, 1
+        while page <= pages:                                        # 1) API → 원본 보관 · 임시 파일 (DB 안 씀)
+            total, items, text = fetch(op, params, page, args.rows)
+            calls += 1
+            key = store.save(op, stamp, page, text)
+            first_key = first_key or key
+            pages = max(1, math.ceil(total / args.rows))
+            for it in items:
+                extra_fields.update(set(it) - set(fields))
+                row = [None if it.get(f) is None else str(it.get(f)) for f in fields] + [page]
+                buf.write(json.dumps(row, ensure_ascii=False) + "\n")
+            fetched += len(items)
+            if pages > 1 or mode == "info":
+                log(f"    ... {page}쪽 받음 ({fetched:,}/{total:,}건)")
+            page += 1
+        buf.seek(0)
+        with db_connect() as conn:                                  # 2) 한 회차 = 한 트랜잭션 (중간 실패 → 전부 되돌림)
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (f"chargeops:{op}",))  # 같은 종류는 차례로
             conn.execute(f"TRUNCATE {stg}")
             cols = ", ".join([snake(f) for f in fields] + ["page_no"])
-            page, pages = 1, 1
-            while page <= pages:
-                total, items, text = fetch(op, params, page, args.rows)
-                calls += 1
-                key = store.save(op, stamp, page, text)
-                first_key = first_key or key
-                pages = max(1, math.ceil(total / args.rows))
-                with conn.cursor().copy(f"COPY {stg} ({cols}) FROM STDIN") as cp:   # 받은 그대로 복사
-                    for it in items:
-                        extra_fields.update(set(it) - set(fields))
-                        cp.write_row([None if it.get(f) is None else str(it.get(f)) for f in fields] + [page])
-                fetched += len(items)
-                if pages > 1 or mode == "info":
-                    log(f"    ... {page}쪽 받음 ({fetched:,}/{total:,}건)")
-                page += 1
+            with conn.cursor().copy(f"COPY {stg} ({cols}) FROM STDIN") as cp:   # 받은 그대로 복사
+                for line in buf:
+                    cp.write_row(json.loads(line))
             result = conn.execute(f"SELECT load_charger_{mode}(%s)", (run_id,)).fetchone()[0]
             conflicts = conn.execute("SELECT stg_info_conflicts()").fetchone()[0] if mode == "info" else {}
             if mode == "info":
@@ -254,6 +266,7 @@ def cmd_load(mode: str, args) -> int:
             raise
         return 1
     finally:
+        buf.close()
         logc.close()
 
 
