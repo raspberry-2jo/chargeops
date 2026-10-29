@@ -29,6 +29,8 @@ def gate(tmp_path,monkeypatch):
         if args[:3]==('git','rev-parse','HEAD'):
             return subprocess.CompletedProcess(args,0,stdout='a'*40+'\n')
         if args[:2]==('git','archive'):
+            assert args[3:5]==('HEAD','--')
+            assert len(args[5:])==6 and all(path.startswith('apps/') and path.endswith('/Dockerfile') for path in args[5:])
             with tarfile.open(fileobj=kwargs['stdout'],mode='w') as archive:
                 data=b'FROM python:3.13-slim\nUSER 10001\n'
                 item=tarfile.TarInfo('apps/csms/Dockerfile');item.size=len(data)
@@ -59,6 +61,11 @@ def gate(tmp_path,monkeypatch):
         assert scratch!=tmp_path
         assert (scratch/'no-ignores').read_text()==''
         mode=args[args.index(g.SCANNER)+1]
+        if '--help' in args:
+            flags='--input --scanners --no-progress ' if mode=='image' else ''
+            flags+='--severity --exit-code --format --config --ignorefile --output'
+            if state['failure']=='unsupported-flag':flags=flags.replace('--format','')
+            return subprocess.CompletedProcess(args,0,stdout=flags)
         if mode=='image':assert (scratch/'image.tar').is_file()
         else:
             assert '--no-progress' not in args, 'Trivy config 0.76.1 does not support --no-progress'
@@ -93,7 +100,10 @@ def test_all_selected_images_and_config_are_scanned_before_receipt_allows_push(g
     g.verify(root,'21',' '.join(NAMES),REGISTRY,'build-21')
     receipt=json.loads((root/'trivy-reports/21/gate.json').read_text())
     assert receipt['status']=='passed' and set(receipt['images'])==set(NAMES)
-    scans=[a for a in state['calls'] if a[:2]==('docker','run')]
+    assert receipt['configuration_scope']['aws_iac_scanned'] is False
+    assert receipt['configuration_scope']['kubernetes_examples_scanned'] is False
+    assert len(receipt['configuration_scope']['files'])==6
+    scans=[a for a in state['calls'] if a[:2]==('docker','run') and '--help' not in a]
     assert [a[a.index(g.SCANNER)+1] for a in scans]==['image']*6+['config']
     assert len(list((root/'trivy-reports/21').glob('*.json')))==8
     assert all(not path.exists() for path in state['save_paths'])
@@ -104,7 +114,7 @@ def test_all_selected_images_and_config_are_scanned_before_receipt_allows_push(g
         assert args[args.index('--exit-code')+1]=='42'
 
 
-@pytest.mark.parametrize('failure',['cve','config','save','download','tool','missing_report','malformed','silent_cve'])
+@pytest.mark.parametrize('failure',['cve','config','save','download','tool','missing_report','malformed','silent_cve','unsupported-flag'])
 def test_every_policy_or_scan_failure_blocks_publication_and_cleans_archives(gate,failure):
     root,state=gate;state['failure']=failure
     with pytest.raises(g.GateError):execute(root)
@@ -136,6 +146,14 @@ def test_same_build_failed_retry_invalidates_prior_success(gate):
     state['failure']='download'
     with pytest.raises(g.GateError):execute(root)
     with pytest.raises(g.GateError):g.verify(root,'21',' '.join(NAMES),REGISTRY,'build-21')
+
+
+def test_summary_separates_accepted_exceptions_from_config_blockers(gate,monkeypatch):
+    root,state=enable_exception(gate,monkeypatch)
+    state['failure']='config'
+    with pytest.raises(g.GateError):execute(root,[NAMES[0]])
+    text=(root/'trivy-reports/21/summary.txt').read_text()
+    assert 'FAILED' in text and 'blocked=1' in text and 'accepted_exceptions=1' in text
 
 
 def test_interruption_retains_failed_receipt_and_removes_tar(gate,monkeypatch):

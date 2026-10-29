@@ -89,12 +89,28 @@ def scanner_command(scratch, cache, reports):
             '-v',f'{reports}:/reports:Z',SCANNER]
 
 
-def scan(base, mode, report, target, policy=None, image=None, audit=None):
-    args=base+[mode]
+def scan_arguments(mode, report_name, target):
+    args=[mode]
     if mode=='image':args+=['--input',target,'--scanners','vuln','--no-progress']
     args+=['--severity','HIGH,CRITICAL','--exit-code','42','--format','json',
-           '--config','','--ignorefile','/scan/no-ignores','--output','/reports/'+report.name]
+           '--config','','--ignorefile','/scan/no-ignores','--output','/reports/'+report_name]
     if mode=='config':args.append(target)
+    return args
+
+
+def preflight(base):
+    for mode in ('image','config'):
+        help_text=command(*(base+[mode,'--help']),capture_output=True,text=True).stdout
+        required={arg for arg in scan_arguments(mode,'probe.json','/scan/probe') if arg.startswith('--')}
+        available=set(re.findall(r'--[a-z][a-z0-9-]*',help_text))
+        missing=required-available
+        if missing:
+            raise GateError(f'Trivy {mode} does not support configured flags: '+', '.join(sorted(missing)))
+    print('Trivy CLI preflight passed: image/config flags supported',flush=True)
+
+
+def scan(base, mode, report, target, policy=None, image=None, audit=None):
+    args=base+scan_arguments(mode,report.name,target)
     started=time.monotonic()
     finding_exit=False
     # 42 means findings only; other nonzero exits remain scanner failures.
@@ -111,6 +127,11 @@ def scan(base, mode, report, target, policy=None, image=None, audit=None):
     if finding_exit and not review['total']:
         raise GateError('Trivy finding exit without valid findings; publication blocked')
     if blocked:
+        data=json.loads(report.read_text(encoding='utf-8'))
+        for result in data.get('Results') or []:
+            for item in result.get('Misconfigurations') or []:
+                if item.get('Severity') in ('HIGH','CRITICAL'):
+                    print(f"  BLOCKED {item['Severity']} {item.get('ID','unknown')} file={result.get('Target','unknown')}",flush=True)
         raise GateError('HIGH/CRITICAL findings remain in '+report.name)
     return round(time.monotonic()-started,3)
 
@@ -151,6 +172,7 @@ def run(root,build,selected,registry,tag):
             scratch=Path(temporary)
             (scratch/'no-ignores').write_text('',encoding='utf-8')
             base=scanner_command(scratch,cache,reports)
+            preflight(base)
             for name,reference in refs.items():
                 print('Trivy image gate: '+reference,flush=True)
                 identity=image_id(reference)
@@ -176,16 +198,22 @@ def run(root,build,selected,registry,tag):
                 if image_id(reference)!=identity:
                     raise GateError('Local image changed during scanning')
                 receipt['images'][name]={'reference':reference,'id':identity,'report':name+'.json'}
-            # Include tracked Dockerfile/IaC sources, excluding old workspaces, auth,
-            # .gitops-delivery, virtualenvs, reports and the Trivy cache.
+            # This delivery gate owns only the six Dockerfiles it builds.
+            # AWS Terraform and example Kubernetes manifests are outside this gate.
+            dockerfiles=[image.dockerfile for image in ci.image_definitions(root)]
+            receipt['configuration_scope']={'type':'built-service-dockerfiles',
+                'files':dockerfiles,'aws_iac_scanned':False,'kubernetes_examples_scanned':False}
             source_tar=scratch/'source.tar'
             with source_tar.open('wb') as stream:
-                command('git','archive','--format=tar','HEAD',cwd=root,stdout=stream)
+                command('git','archive','--format=tar','HEAD','--',*dockerfiles,cwd=root,stdout=stream)
             source=scratch/'source';source.mkdir()
             with tarfile.open(source_tar) as archive:
                 archive.extractall(source,filter='data')
-            print('Trivy configuration gate: tracked checkout '+receipt['source'],flush=True)
-            receipt['timings']['config_scan_seconds']=scan(base,'config',reports/'config.json','/scan/source')
+            print('Trivy configuration gate: six built service Dockerfiles at '+receipt['source']+
+                  '; AWS Terraform and Kubernetes examples OUT OF SCOPE',flush=True)
+            config_review={}
+            receipt['reviews']['configuration']=config_review
+            receipt['timings']['config_scan_seconds']=scan(base,'config',reports/'config.json','/scan/source',audit=config_review)
             if source_commit(root)!=receipt['source']:
                 raise GateError('Checkout changed during scanning')
         receipt['status']='passed'
@@ -197,7 +225,8 @@ def run(root,build,selected,registry,tag):
         receipt_path.write_text(json.dumps(receipt,indent=2),encoding='utf-8')
         accepted=sum(item.get('excepted',0) for item in receipt.get('reviews',{}).values())
         unique={entry['cve'] for item in receipt.get('reviews',{}).values() for entry in item.get('exceptions',[])}
-        summary=f"Trivy {receipt['status'].upper()}: exceptions={accepted} findings / {len(unique)} CVEs"
+        blocked=sum(item.get('blocked',0) for item in receipt.get('reviews',{}).values())
+        summary=f"Trivy {receipt['status'].upper()}: blocked={blocked}, accepted_exceptions={accepted} ({len(unique)} unique CVEs)"
         (reports/'summary.txt').write_text(summary+'\n',encoding='utf-8')
     print(summary+'; all selected images and configuration passed policy; publication may proceed',flush=True)
 
