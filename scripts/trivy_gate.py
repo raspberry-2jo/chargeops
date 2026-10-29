@@ -91,9 +91,9 @@ def scanner_command(scratch, cache, reports):
 
 def scan(base, mode, report, target, policy=None, image=None, audit=None):
     args=base+[mode]
-    if mode=='image':args+=['--input',target,'--scanners','vuln']
+    if mode=='image':args+=['--input',target,'--scanners','vuln','--no-progress']
     args+=['--severity','HIGH,CRITICAL','--exit-code','42','--format','json',
-           '--config','','--ignorefile','/scan/no-ignores','--output','/reports/'+report.name,'--no-progress']
+           '--config','','--ignorefile','/scan/no-ignores','--output','/reports/'+report.name]
     if mode=='config':args.append(target)
     started=time.monotonic()
     finding_exit=False

@@ -61,6 +61,7 @@ def gate(tmp_path,monkeypatch):
         mode=args[args.index(g.SCANNER)+1]
         if mode=='image':assert (scratch/'image.tar').is_file()
         else:
+            assert '--no-progress' not in args, 'Trivy config 0.76.1 does not support --no-progress'
             assert (scratch/'source/apps/csms/Dockerfile').is_file()
             assert not (scratch/'source/.trivy-cache').exists()
         if state['failure']=='download':raise subprocess.CalledProcessError(1,args)
