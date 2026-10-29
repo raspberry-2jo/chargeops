@@ -3,3 +3,6 @@ psycopg[binary]==3.3.6
 psycopg-pool==3.3.3
 slack_bolt==1.30.0
 slack_sdk==3.45.0
+setuptools==84.2.1
+msgpack==1.2.3
+urllib3==2.8.0

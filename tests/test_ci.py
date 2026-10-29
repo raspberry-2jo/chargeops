@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = (ROOT / "Jenkinsfile").read_text(encoding="utf-8")
 BLOCKS = re.findall(r"sh(?:\(script:)?\s*'''(.*?)'''", PIPELINE, re.DOTALL)
 BUILD = next(block for block in BLOCKS if "build_if_selected()" in block)
+GATE = next(block for block in BLOCKS if 'trivy_gate.py run' in block)
+PUSH = next(block for block in BLOCKS if 'trivy_gate.py verify' in block and 'docker push' in block)
 DIFF = next(block for block in BLOCKS if "GIT_PREVIOUS_SUCCESSFUL_COMMIT" in block)
 spec = importlib.util.spec_from_file_location("ci_validator", ROOT / "scripts" / "ci.py")
 ci = importlib.util.module_from_spec(spec)
@@ -31,21 +33,25 @@ def bash():
     return executable
 
 
-def build_with_stub(bash, tmp_path, names, publish=True, branch="kim_chanju", change_id="", fail=False, publish_dev_tag=True):
+def build_with_stub(bash, tmp_path, names, publish=True, branch="kim_chanju", change_id="", fail=False, publish_dev_tag=True, fail_gate=False):
     log = tmp_path / "docker-calls.txt"
     env = os.environ.copy()
     env.update(CALL_LOG=log.as_posix(), BUILD_IMAGES=" ".join(names),
                REGISTRY="registry.chargeops.lab:5000/chargeops", IMAGE_TAG="build-12-abc",
                PUBLISH_IMAGES=str(publish).lower(), PUBLISH_BRANCH="kim_chanju",
                CHECKOUT_BRANCH=branch, CHANGE_ID=change_id, FAIL_BUILD=str(int(fail)),
-               PUBLISH_DEV_TAG=str(publish_dev_tag).lower())
+               PUBLISH_DEV_TAG=str(publish_dev_tag).lower(), BUILD_NUMBER='12', FAIL_GATE=str(int(fail_gate)))
     stub = '''docker() {
       printf '%s\t' "$@" >> "$CALL_LOG"
       printf '\n' >> "$CALL_LOG"
       if [ "$1" = build ] && [ "$FAIL_BUILD" = 1 ]; then return 31; fi
     }
+    python3.12() {
+      if [ "$2" = run ] && [ "$FAIL_GATE" = 1 ]; then return 47; fi
+    }
 '''
-    result = subprocess.run([bash], input=stub + BUILD, cwd=ROOT, env=env, text=True, capture_output=True)
+    shell=stub+BUILD+'\n'+GATE+('\n'+PUSH if publish else '')
+    result = subprocess.run([bash], input=shell, cwd=ROOT, env=env, text=True, capture_output=True)
     calls = [line.rstrip("\t").split("\t") for line in log.read_text().splitlines()] if log.exists() else []
     return result, calls
 
@@ -102,6 +108,24 @@ def test_build_failure_prevents_all_pushes(bash, tmp_path):
     result, calls = build_with_stub(bash, tmp_path, [image.name for image in IMAGES], fail=True)
     assert result.returncode == 31
     assert [call[0] for call in calls] == ["build"]
+
+
+def test_trivy_failure_prevents_all_registry_pushes(bash,tmp_path):
+    result,calls=build_with_stub(bash,tmp_path,[image.name for image in IMAGES],fail_gate=True)
+    assert result.returncode==47
+    assert [call[0] for call in calls]==['build']*6
+
+
+def test_trivy_stage_precedes_every_publication_and_always_archives():
+    assert PIPELINE.index("stage('Docker Build") < PIPELINE.index("stage('Trivy Quality Gate')")
+    assert PIPELINE.index("stage('Trivy Quality Gate')") < PIPELINE.index("stage('Registry Push") < PIPELINE.index("stage('ECR mirror push')")
+    assert 'docker push' not in BUILD
+    assert 'trivy_gate.py verify' in PUSH
+    stage=PIPELINE.split("stage('Trivy Quality Gate')",1)[1].split("stage('Registry Push",1)[0]
+    assert 'catchError' not in stage and 'returnStatus' not in stage and '|| true' not in stage
+    assert 'post {' in stage and 'always {' in stage and 'archiveArtifacts' in stage
+    ecr=PIPELINE.split("stage('ECR mirror push')",1)[1].split("stage('Development",1)[0]
+    assert ecr.index('trivy_gate.py verify') < ecr.index('catchError')
 
 
 def test_bootstrap_default_never_moves_dev_tag(bash, tmp_path):

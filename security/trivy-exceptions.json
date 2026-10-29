@@ -1,0 +1,155 @@
+{
+  "schema": 1,
+  "review": "docs/security/trivy-debian-review-2026-10-29.md",
+  "kev_catalog_version": "2026.10.28",
+  "exceptions": [
+    {
+      "cve": "CVE-2026-76642",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
+      "os_family": "debian",
+      "os_release": "13",
+      "packages": {
+        "bsdutils": "1:2.41.5-0+deb13u1",
+        "libblkid1": "2.41.5-0+deb13u1",
+        "liblastlog2-2": "2.41.5-0+deb13u1",
+        "libmount1": "2.41.5-0+deb13u1",
+        "libsmartcols1": "2.41.5-0+deb13u1",
+        "libuuid1": "2.41.5-0+deb13u1",
+        "login": "1:4.16.0-2+really2.41.5-0+deb13u1",
+        "mount": "2.41.5-0+deb13u1",
+        "util-linux": "2.41.5-0+deb13u1"
+      },
+      "reason": "Local mount helper/post-mount hooks; mount/umount removed and SUID/SGID stripped.",
+      "owner": "ChargeOps maintainers",
+      "reviewed_on": "2026-10-29",
+      "expires_on": "2026-11-05",
+      "source": "https://security-tracker.debian.org/tracker/CVE-2026-76642"
+    },
+    {
+      "cve": "CVE-2026-78408",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
+      "os_family": "debian",
+      "os_release": "13",
+      "packages": {
+        "bsdutils": "1:2.41.5-0+deb13u1",
+        "libblkid1": "2.41.5-0+deb13u1",
+        "liblastlog2-2": "2.41.5-0+deb13u1",
+        "libmount1": "2.41.5-0+deb13u1",
+        "libsmartcols1": "2.41.5-0+deb13u1",
+        "libuuid1": "2.41.5-0+deb13u1",
+        "login": "1:4.16.0-2+really2.41.5-0+deb13u1",
+        "mount": "2.41.5-0+deb13u1",
+        "util-linux": "2.41.5-0+deb13u1"
+      },
+      "reason": "Privileged nsenter --join-cgroup required; nsenter removed; application does not invoke it.",
+      "owner": "ChargeOps maintainers",
+      "reviewed_on": "2026-10-29",
+      "expires_on": "2026-11-05",
+      "source": "https://security-tracker.debian.org/tracker/CVE-2026-78408"
+    },
+    {
+      "cve": "CVE-2026-78409",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
+      "os_family": "debian",
+      "os_release": "13",
+      "packages": {
+        "bsdutils": "1:2.41.5-0+deb13u1",
+        "libblkid1": "2.41.5-0+deb13u1",
+        "liblastlog2-2": "2.41.5-0+deb13u1",
+        "libmount1": "2.41.5-0+deb13u1",
+        "libsmartcols1": "2.41.5-0+deb13u1",
+        "libuuid1": "2.41.5-0+deb13u1",
+        "login": "1:4.16.0-2+really2.41.5-0+deb13u1",
+        "mount": "2.41.5-0+deb13u1",
+        "util-linux": "2.41.5-0+deb13u1"
+      },
+      "reason": "Local fstab-authorized subdirectory mount required; mount/umount removed.",
+      "owner": "ChargeOps maintainers",
+      "reviewed_on": "2026-10-29",
+      "expires_on": "2026-11-05",
+      "source": "https://security-tracker.debian.org/tracker/CVE-2026-78409"
+    },
+    {
+      "cve": "CVE-2026-78410",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
+      "os_family": "debian",
+      "os_release": "13",
+      "packages": {
+        "bsdutils": "1:2.41.5-0+deb13u1",
+        "libblkid1": "2.41.5-0+deb13u1",
+        "liblastlog2-2": "2.41.5-0+deb13u1",
+        "libmount1": "2.41.5-0+deb13u1",
+        "libsmartcols1": "2.41.5-0+deb13u1",
+        "libuuid1": "2.41.5-0+deb13u1",
+        "login": "1:4.16.0-2+really2.41.5-0+deb13u1",
+        "mount": "2.41.5-0+deb13u1",
+        "util-linux": "2.41.5-0+deb13u1"
+      },
+      "reason": "Privileged fstab bind mount race required; mount/umount removed and SUID/SGID stripped.",
+      "owner": "ChargeOps maintainers",
+      "reviewed_on": "2026-10-29",
+      "expires_on": "2026-11-05",
+      "source": "https://security-tracker.debian.org/tracker/CVE-2026-78410"
+    },
+    {
+      "cve": "CVE-2026-54369",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
+      "os_family": "debian",
+      "os_release": "13",
+      "packages": {
+        "libacl1": "2.3.2-2+b1"
+      },
+      "reason": "Privileged pathname ACL caller required; reviewed Python service sources have no ACL/subprocess execution calls; non-root images and SUID/SGID stripped. Residual library risk accepted temporarily.",
+      "owner": "ChargeOps maintainers",
+      "reviewed_on": "2026-10-29",
+      "expires_on": "2026-11-05",
+      "source": "https://security-tracker.debian.org/tracker/CVE-2026-54369"
+    },
+    {
+      "cve": "CVE-2025-69720",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
+      "os_family": "debian",
+      "os_release": "13",
+      "packages": {
+        "libncursesw6": "6.5+20250216-2",
+        "libtinfo6": "6.5+20250216-2",
+        "ncurses-base": "6.5+20250216-2",
+        "ncurses-bin": "6.5+20250216-2"
+      },
+      "reason": "infocmp command parser affected; infocmp removed, application does not invoke terminal tools.",
+      "owner": "ChargeOps maintainers",
+      "reviewed_on": "2026-10-29",
+      "expires_on": "2026-11-05",
+      "source": "https://security-tracker.debian.org/tracker/CVE-2025-69720"
+    },
+    {
+      "cve": "CVE-2026-16742",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
+      "os_family": "debian",
+      "os_release": "13",
+      "packages": {
+        "libsystemd0": "257.13-1~deb13u1",
+        "libudev1": "257.13-1~deb13u1"
+      },
+      "reason": "systemd-homed-managed local logged-in account required; homed/homectl removed; image runs Python as UID 10001.",
+      "owner": "ChargeOps maintainers",
+      "reviewed_on": "2026-10-29",
+      "expires_on": "2026-11-05",
+      "source": "https://security-tracker.debian.org/tracker/CVE-2026-16742"
+    },
+    {
+      "cve": "CVE-2026-9538",
+      "images": ["chargeops-ai-gateway", "chargeops-chatops-bot", "chargeops-csms", "chargeops-notifier", "chargeops-vcharger", "chargeops-collector"],
+      "os_family": "debian",
+      "os_release": "13",
+      "packages": {
+        "perl-base": "5.40.1-6+deb13u1"
+      },
+      "reason": "Perl Archive::Tar parsing hostile tar required; Perl interpreters removed; application has no Perl/archive execution path.",
+      "owner": "ChargeOps maintainers",
+      "reviewed_on": "2026-10-29",
+      "expires_on": "2026-11-05",
+      "source": "https://security-tracker.debian.org/tracker/CVE-2026-9538"
+    }
+  ]
+}

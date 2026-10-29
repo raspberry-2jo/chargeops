@@ -7,3 +7,6 @@ psycopg[binary]==3.3.6
 psycopg-pool==3.3.3
 websockets==17.2
 requests==2.34.2
+setuptools==84.2.1
+msgpack==1.2.3
+urllib3==2.8.0

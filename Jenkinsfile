@@ -137,7 +137,7 @@ pipeline {
             echo 'First build or BUILD_ALL_IMAGES=true: building all six images.'
           } else {
             changedFiles.each { path ->
-              if (path == 'Jenkinsfile' || path == 'scripts/ci.py' || path == env.APP_ROOT + '/.dockerignore') {
+              if (path == 'Jenkinsfile' || path == 'scripts/ci.py' || path == 'scripts/trivy_gate.py' || path == 'scripts/trivy_exceptions.py' || path.startsWith('security/') || path == env.APP_ROOT + '/.dockerignore') {
                 selected.addAll(allImages)
               } else if (path == 'requirements-dev.txt' || path == 'pytest.ini' || path.startsWith('scripts/') ||
                          path.startsWith('tests/') || path.contains('/tests/') || path.contains('/test_')) {
@@ -192,7 +192,7 @@ pipeline {
         }
       }
     }
-    stage('Registry Build and Push: changed images only') {
+    stage('Docker Build: changed images only') {
       when { expression { env.BUILD_IMAGES?.trim() } }
       steps {
         sh '''
@@ -227,17 +227,55 @@ pipeline {
           build_if_selected chargeops-notifier apps/notifier/Dockerfile apps
           build_if_selected chargeops-vcharger apps/virtual-charger/Dockerfile apps
           build_if_selected chargeops-collector apps/collector/Dockerfile apps
-          if [ "$PUBLISH_IMAGES" = 'true' ]; then
-            # Publish only after every selected build succeeds.
+        '''
+      }
+    }
+    stage('Trivy Quality Gate') {
+      when { expression { env.BUILD_IMAGES?.trim() } }
+      steps {
+        timeout(time: 30, unit: 'MINUTES') {
+          sh '''
+            set -eu
+            python3.12 scripts/trivy_gate.py run --build-number "$BUILD_NUMBER" \
+              --images "$BUILD_IMAGES" --registry "$REGISTRY" --tag "$IMAGE_TAG"
+          '''
+        }
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: "trivy-reports/${env.BUILD_NUMBER}/*.json",
+            allowEmptyArchive: true, fingerprint: true
+          archiveArtifacts artifacts: "trivy-reports/${env.BUILD_NUMBER}/summary.txt",
+            allowEmptyArchive: true
+          script {
+            def summaryPath = "trivy-reports/${env.BUILD_NUMBER}/summary.txt"
+            if (fileExists(summaryPath)) {
+              currentBuild.description = readFile(summaryPath).trim()
+            }
+          }
+        }
+      }
+    }
+    stage('Registry Push: scanned images only') {
+      when { expression { env.PUBLISH_IMAGES == 'true' && env.BUILD_IMAGES?.trim() } }
+      steps {
+        sh '''
+          set -eu
+          if [ "$CHECKOUT_BRANCH" != "$PUBLISH_BRANCH" ] || [ -n "${CHANGE_ID:-}" ]; then
+            echo 'Image publication requires the configured non-PR branch.' >&2
+            exit 1
+          fi
+          # Also blocks Restart from Stage from bypassing a missing/failed/stale scan.
+          python3.12 scripts/trivy_gate.py verify --build-number "$BUILD_NUMBER" \
+            --images "$BUILD_IMAGES" --registry "$REGISTRY" --tag "$IMAGE_TAG"
+          for NAME in $BUILD_IMAGES; do
+            docker push "$REGISTRY/$NAME:$IMAGE_TAG"
+          done
+          if [ "${PUBLISH_DEV_TAG:-false}" = 'true' ]; then
             for NAME in $BUILD_IMAGES; do
-              docker push "$REGISTRY/$NAME:$IMAGE_TAG"
+              docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$REGISTRY/$NAME:dev"
+              docker push "$REGISTRY/$NAME:dev"
             done
-            if [ "${PUBLISH_DEV_TAG:-false}" = 'true' ]; then
-              for NAME in $BUILD_IMAGES; do
-                docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$REGISTRY/$NAME:dev"
-                docker push "$REGISTRY/$NAME:dev"
-              done
-            fi
           fi
         '''
       }
@@ -245,6 +283,12 @@ pipeline {
     stage('ECR mirror push') {
       when { expression { params.ECR_MIRROR && env.PUBLISH_IMAGES == 'true' && env.BUILD_IMAGES?.trim() } }
       steps {
+        // Gate failure is fatal, even though an ECR mirror outage remains UNSTABLE.
+        sh '''
+          set -eu
+          python3.12 scripts/trivy_gate.py verify --build-number "$BUILD_NUMBER" \
+            --images "$BUILD_IMAGES" --registry "$REGISTRY" --tag "$IMAGE_TAG"
+        '''
         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
           withCredentials([
             usernamePassword(credentialsId: params.ECR_CREDENTIAL_ID.trim(),

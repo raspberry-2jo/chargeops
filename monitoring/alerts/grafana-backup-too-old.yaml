@@ -1,0 +1,112 @@
+# Grafana 경보 규칙 BackupTooOld (2026-10-29, 온프렘 Grafana에서 Export)
+# - 기록용: 운영 Grafana에는 화면에서 만들었고(PVC kps-grafana에 저장), 이 파일은 같은 설정을 저장소에 남긴 것
+# - 내용: backup_repo_status 기준 저장소별 마지막 백업이 26시간을 넘거나 상태 오류(999)면 경보. 10분마다 평가, 10분 지속 시 발생
+# - 라벨 code=P-04, severity=sev2 (BackupStoreDown, WalArchiveFailing과 같은 백업 장애 코드)
+# - 알림 대상: Contact point chargeops-alertmanager (종류 Alertmanager,
+#   URL http://kps-kube-prometheus-stack-alertmanager.monitoring:9093) -> notifier -> Slack 스레드 + incident
+#   Contact point는 이 파일에 없으므로 다시 만들 때 먼저 만들어야 함
+# - 다시 만들 때: Grafana 파일 프로비저닝(provisioning/alerting) 또는 화면에서 같은 값으로 생성
+# - 비밀값 없음
+apiVersion: 1
+groups:
+    - orgId: 1
+      name: backup
+      folder: ChargeOps-Alerts
+      interval: 10m
+      rules:
+        - uid: bg2nm83zz4hdsb
+          title: BackupTooOld
+          condition: C
+          data:
+            - refId: A
+              relativeTimeRange:
+                from: 600
+                to: 0
+              datasourceUid: chargeops-db
+              model:
+                dataset: chargeops_ro
+                datasource:
+                    type: grafana-postgresql-datasource
+                    uid: chargeops-db
+                editorMode: code
+                format: table
+                instant: true
+                intervalMs: 1000
+                maxDataPoints: 43200
+                rawQuery: true
+                rawSql: "SELECT repo_name AS repo,\n  CASE WHEN repo_status IS DISTINCT FROM 'ok' OR last_error THEN 999\n       ELSE round((extract(epoch FROM now() - last_stop) / 3600)::numeric, 1) END AS hours\nFROM backup_repo_status"
+                refId: A
+                sql:
+                    columns:
+                        - parameters: []
+                          type: function
+                    groupBy:
+                        - property:
+                            type: string
+                          type: groupBy
+                    limit: 50
+            - refId: reducer
+              queryType: expression
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 0
+                            - 0
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params: []
+                      reducer:
+                        params: []
+                        type: avg
+                      type: query
+                datasource:
+                    name: Expression
+                    type: __expr__
+                    uid: __expr__
+                expression: A
+                intervalMs: 1000
+                maxDataPoints: 43200
+                reducer: last
+                refId: reducer
+                type: reduce
+            - refId: C
+              queryType: expression
+              datasourceUid: __expr__
+              model:
+                conditions:
+                    - evaluator:
+                        params:
+                            - 26
+                        type: gt
+                      operator:
+                        type: and
+                      query:
+                        params:
+                            - C
+                      reducer:
+                        params: []
+                        type: last
+                      type: query
+                datasource:
+                    type: __expr__
+                    uid: __expr__
+                expression: reducer
+                intervalMs: 1000
+                maxDataPoints: 43200
+                refId: C
+                type: threshold
+          noDataState: NoData
+          execErrState: Error
+          for: 10m
+          annotations:
+            summary: pgBackRest {{ $labels.repo }} 마지막 백업 26시간 초과 - 대시보드 백업 저장소 상태 확인
+          labels:
+            code: P-04
+            severity: sev2
+          isPaused: false
+          notification_settings:
+            receiver: chargeops-alertmanager

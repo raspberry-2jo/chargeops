@@ -93,6 +93,9 @@ pgbackrest-local/
 # ----- 로그 -----
 *.log
 logs/
+trivy-reports/
+.trivy-cache/
+.trivy-scan-*/
 
 # ----- 대용량 파일 (Notion·드라이브에 올리고 링크만) -----
 *.mp4
