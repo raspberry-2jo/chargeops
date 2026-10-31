@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -39,6 +40,17 @@ class DeliveryPreflightError(ValueError):
 
 class RegistryLookupError(RuntimeError):
     """Safe connection diagnostics without response bodies or credentials."""
+
+
+def poll_seconds():
+    """Polling cadence only; convergence and Stage budgets remain unchanged."""
+    try:
+        value = float(os.environ.get('CD_POLL_SECONDS', '5'))
+    except ValueError:
+        raise DeliveryPreflightError('CD_POLL_SECONDS must be a finite positive number') from None
+    if not math.isfinite(value) or value <= 0:
+        raise DeliveryPreflightError('CD_POLL_SECONDS must be a finite positive number')
+    return value
 
 
 def urlopen(request, timeout=30):
@@ -470,20 +482,29 @@ def verification_job(candidate):
     return job
 
 
-def log_dev_progress(started, timeout):
+def dev_progress():
     app = kubectl('-n', 'argocd', 'get', 'application', APPLICATION).get('status', {})
-    message = (f"Dev verification: elapsed={int(time.monotonic() - started)}s/{timeout}s"
-               f", sync={app.get('sync', {}).get('status', 'Unknown')}"
-               f", health={app.get('health', {}).get('status', 'Unknown')}")
+    progress = {'sync': app.get('sync', {}).get('status', 'Unknown'),
+                'health': app.get('health', {}).get('status', 'Unknown')}
     if DEV == CANARY_DEV:
         rollout = kubectl('-n', 'dev', 'get', 'rollout', 'csms')
         state = rollout.get('status', {})
         analysis = state.get('currentStepAnalysisRunStatus') or {}
-        message += (f", rollout={state.get('phase', 'Unknown')}"
-                    f", step={state.get('currentStepIndex', 0)}/{len(rollout.get('spec', {}).get('strategy', {}).get('canary', {}).get('steps', []))}"
-                    f", ready={state.get('readyReplicas', 0)}/{rollout.get('spec', {}).get('replicas', 0)}"
-                    f", analysis={analysis.get('name', 'none')}"
-                    f", analysis_phase={analysis.get('phase', 'none')}")
+        progress.update(rollout=state.get('phase', 'Unknown'), step=state.get('currentStepIndex', 0),
+                        steps=len(rollout.get('spec', {}).get('strategy', {}).get('canary', {}).get('steps', [])),
+                        ready=state.get('readyReplicas', 0), desired=rollout.get('spec', {}).get('replicas', 0),
+                        analysis=analysis.get('name', 'none'), analysis_phase=analysis.get('phase', 'none'))
+    return progress
+
+
+def log_dev_progress(started, timeout, progress=None):
+    progress = dev_progress() if progress is None else progress
+    message = (f"Dev verification: elapsed={int(time.monotonic() - started)}s/{timeout}s"
+               f", sync={progress['sync']}, health={progress['health']}")
+    if DEV == CANARY_DEV:
+        message += (f", rollout={progress['rollout']}, step={progress['step']}/{progress['steps']}"
+                    f", ready={progress['ready']}/{progress['desired']}"
+                    f", analysis={progress['analysis']}, analysis_phase={progress['analysis_phase']}")
     print(message, flush=True)
 
 
@@ -497,18 +518,29 @@ def verify(repo, candidate_path, receipt_path, timeout):
         raise DeliveryPreflightError('DEV_ARGO_APPLICATION must be a Kubernetes resource name')
     print('Checking Dev Application=' + APPLICATION + ', namespace=dev, path=' + DEV, flush=True)
     started = time.monotonic()
+    interval = poll_seconds()
     deadline = started + timeout
     next_progress = started
+    last_progress = None
     while time.monotonic() < deadline:
         if dev_rollout_failed(candidate['image']):
             raise DeliveryPreflightError('Dev RollingUpdate failed; Dev recovery is required' if DEV == ROLLING_DEV else
                                          'Dev Canary analysis aborted the candidate; Dev recovery is required')
         if live_candidate(candidate['image']):
             break
-        if time.monotonic() >= next_progress:
-            log_dev_progress(started, timeout)
+        try:
+            progress = dev_progress()
+        except (DeliveryPreflightError, RuntimeError):
+            # A diagnostic read must not introduce a new delivery verdict.
+            progress = {'sync': 'Unknown', 'health': 'Unknown'}
+            if DEV == CANARY_DEV:
+                progress.update(rollout='Unknown', step=0, steps=0, ready=0, desired=0,
+                                analysis='none', analysis_phase='none')
+        if progress != last_progress or time.monotonic() >= next_progress:
+            log_dev_progress(started, timeout, progress)
+            last_progress = progress
             next_progress = time.monotonic() + 30
-        time.sleep(5)
+        time.sleep(interval)
     else:
         log_dev_progress(started, timeout)
         raise DeliveryPreflightError('Development did not converge to the exact candidate')

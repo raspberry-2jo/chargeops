@@ -223,11 +223,12 @@ def regular_workloads_ready(workloads, operation):
 
 
 def wait(image, revision, timeout, marker, workloads=None):
+    interval = cd.poll_seconds()
     deadline = time.monotonic() + timeout
     last_phase = None
     last_checks = None
-    polls = 0
-    while time.monotonic() < deadline:
+    next_progress = 0
+    while (now := time.monotonic()) < deadline:
         app = check_application()
         operation = app.get('status', {}).get('operationState', {})
         own = owns_operation(operation, revision, marker)
@@ -241,13 +242,17 @@ def wait(image, revision, timeout, marker, workloads=None):
         deployment, actual = deployment_image()
         apps_ready = own and operation.get('phase') == 'Succeeded' and regular_workloads_ready(workloads or [], operation)
         checks = (own, operation.get('phase') == 'Succeeded', healthy, actual == image, apps_ready)
-        if checks != last_checks or polls % 6 == 0:
+        status = app.get('status', {})
+        progress = (checks, status.get('sync', {}).get('status', 'Unknown'),
+                    status.get('health', {}).get('status', 'Unknown'))
+        if progress != last_checks or now >= next_progress:
             print('Canary completion checks: own_sync=' + str(checks[0])
                   + ', sync_succeeded=' + str(checks[1]) + ', rollout_ready=' + str(checks[2])
                   + ', deployment_image_matches=' + str(checks[3])
-                  + ', application_workloads_ready=' + str(checks[4]), flush=True)
-            last_checks = checks
-        polls += 1
+                  + ', application_workloads_ready=' + str(checks[4])
+                  + ', sync=' + progress[1] + ', health=' + progress[2], flush=True)
+            last_checks = progress
+            next_progress = now + 30
         if actual == image and (rollout.get('status', {}).get('abort') or phase == 'Degraded'):
             # During recovery the old aborted generation may still be observed.
             # Wait until the new workload template is reflected in current RS.
@@ -255,7 +260,7 @@ def wait(image, revision, timeout, marker, workloads=None):
                 raise cd.DeliveryPreflightError('Canary analysis or progress deadline aborted the update')
         if own and operation.get('phase') == 'Succeeded' and healthy and apps_ready:
             return
-        time.sleep(5)
+        time.sleep(interval)
     raise cd.DeliveryPreflightError('Canary completion deadline exceeded; inspect the last completion checks and recovery receipt')
 
 
