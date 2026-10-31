@@ -79,6 +79,9 @@ class DevVerificationTiming:
     def commit(self, candidate):
         revision = candidate.get('development_revision', '')
         self.target = revision if isinstance(revision, str) and re.fullmatch(r'[a-f0-9]{40}', revision) else None
+        if candidate.get('development_unchanged'):
+            self.event('development_digest_unchanged', 'git_commit=not_required')
+            return
         committed = candidate.get('development_committed_at')
         try:
             value = datetime.fromisoformat(committed)
@@ -261,6 +264,25 @@ def candidate_images(candidate):
     return images
 
 
+def application_digest_snapshot(repo, overlay):
+    """Canonical pinned app identities, including duplicate collector CronJobs."""
+    result = {}
+    for document in rendered(repo, overlay):
+        for container in workload_containers(document):
+            reference = container['image']
+            repository = image_repository(reference)
+            canonical = next((name for name, aliases in IMAGE_ALIASES.items() if repository in aliases), None)
+            if canonical is None:
+                continue
+            if not re.fullmatch(re.escape(repository) + r'@sha256:[a-f0-9]{64}', reference):
+                raise DeliveryPreflightError('Application baseline must be digest-pinned: ' + canonical)
+            pinned = canonical + '@' + reference.split('@', 1)[1]
+            if canonical in result and result[canonical] != pinned:
+                raise DeliveryPreflightError('Application baseline contains conflicting digests: ' + canonical)
+            result[canonical] = pinned
+    return result
+
+
 def pin_application_images(repo, images):
     """Pin only selected apps in prod, including the legacy collector image alias."""
     path = Path(repo) / PROD / 'kustomization.yaml'
@@ -392,20 +414,32 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False, bu
     prod_image = csms_image(repo, PROD)
     if '@sha256:' not in prod_image:
         raise DeliveryPreflightError('Production CSMS is not digest-pinned in GitOps. Run freeze-production.py on mgmt, then commit and push overlays/prod/kustomization.yaml before retrying')
-    candidate = {'schema': 1, 'source': source, 'image': resolve_digest(IMAGE + ':' + tag),
+    selected = None if build_images is None else set(build_images.split())
+    allowed = {image.rsplit('/', 1)[-1]: image for image in APP_IMAGES.values()}
+    if selected is not None and selected - allowed.keys():
+        raise DeliveryPreflightError('Unknown image selected for application delivery')
+    previous_dev = csms_image(repo, DEV)
+    csms_selected = selected is None or 'chargeops-csms' in selected
+    candidate_image = resolve_digest(IMAGE + ':' + tag) if csms_selected else previous_dev
+    if not re.fullmatch(re.escape(IMAGE) + r'@sha256:[a-f0-9]{64}', candidate_image):
+        raise DeliveryPreflightError('Current Dev CSMS must be digest-pinned when not rebuilt')
+    candidate = {'schema': 1, 'source': source, 'build_tag': tag, 'image': candidate_image,
                  'verification_mode': 'ocpp-simulation' if DEV == ROLLING_DEV else ('ocpp-fixture' if ocpp_fixture_test else 'read-only'),
                  'production_fingerprint': before, 'previous_production_image': prod_image,
                  'development_overlay': DEV}
     if build_images is not None:
-        selected = set(build_images.split())
-        allowed = {image.rsplit('/', 1)[-1]: image for image in APP_IMAGES.values()}
-        if selected - allowed.keys():
-            raise DeliveryPreflightError('Unknown image selected for application delivery')
         images = {IMAGE: candidate['image']}
         for name in sorted(selected - {'chargeops-csms'}):
             repository = allowed[name]
             images[repository] = resolve_digest(repository + ':' + tag)
         candidate['images'] = images
+        candidate['built_images'] = sorted(selected)
+        # Bind unchanged application digests too, without rebuilding or repinning them.
+        candidate['release_images'] = application_digest_snapshot(repo, PROD)
+        candidate['release_images'].update(images)
+        candidate['previous_development_images'] = application_digest_snapshot(repo, DEV)
+        candidate['development_images'] = dict(candidate['previous_development_images'])
+        candidate['development_images'][IMAGE] = candidate['image']
         candidate_images(candidate)
     if DEV in (CANARY_DEV, ROLLING_DEV):
         previous = csms_image(repo, DEV)
@@ -416,19 +450,30 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False, bu
         candidate['canary_fingerprint'] = fingerprint(rendered(repo, CANARY))
     # A fixed pre-delivery timestamp is reused by all Canary analysis steps.
     # Keep the operator's enable flag; never fabricate a baseline during analysis.
-    if DEV == CANARY_DEV:
+    if DEV == CANARY_DEV and csms_selected:
         stamp_gate_baseline(repo, DEV)
-    pin_image(repo, DEV, candidate['image'])
+    if csms_selected:
+        pin_image(repo, DEV, candidate['image'])
+    if selected is not None:
+        if application_digest_snapshot(repo, DEV) != candidate['development_images']:
+            raise DeliveryPreflightError('Development digest combination differs from the prepared candidate')
     if production_fingerprint(repo) != before:
         raise DeliveryPreflightError('Development update changed production')
     candidate['development_fingerprint'] = fingerprint(rendered(repo, DEV))
-    candidate['development_revision'] = commit(repo, DEV, f'build(dev): verify CSMS {tag}',
-                                              allow_gate_baseline=True)
-    candidate['development_committed_at'] = iso_time()
+    candidate['development_unchanged'] = not csms_selected
+    if candidate['development_unchanged']:
+        candidate['development_revision'] = run('git', 'rev-parse', 'HEAD', cwd=repo)
+    else:
+        candidate['development_revision'] = commit(repo, DEV, f'build(dev): verify CSMS {tag}',
+                                                  allow_gate_baseline=True)
+        candidate['development_committed_at'] = iso_time()
     save(output, candidate)
-    print('Dev timing: at=' + candidate['development_committed_at']
-          + ' elapsed=NA event=git_commit_completed verify=not_started', flush=True)
-    print('Development digest committed; production unchanged')
+    if candidate['development_unchanged']:
+        print('Development digest unchanged; verifying existing deployment without a GitOps commit', flush=True)
+    else:
+        print('Dev timing: at=' + candidate['development_committed_at']
+              + ' elapsed=NA event=git_commit_completed verify=not_started', flush=True)
+        print('Development digest committed; production unchanged')
 
 
 def kubectl(*args):
@@ -664,6 +709,9 @@ def recover_dev(repo, candidate_path, recovery_path, timeout=600):
     """Restore only this failed candidate's Dev image; never use Ops credentials."""
     candidate = load(candidate_path)
     candidate_check(candidate)
+    if candidate.get('development_unchanged'):
+        print('Dev recovery skipped: verification-only; no Dev image was modified')
+        return
     if candidate.get('development_mode') not in ('canary', 'rolling') or DEV not in (CANARY_DEV, ROLLING_DEV):
         print('Dev image recovery skipped: candidate did not use managed Dev delivery')
         return
@@ -714,6 +762,8 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
             require_approved_pr=False):
     candidate, receipt = load(candidate_path), load(receipt_path)
     validate_receipt(candidate, receipt, int(time.time()))
+    if candidate.get('built_images') == []:
+        raise DeliveryPreflightError('No image changes to promote; current Dev was verification-only')
     approval = None
     if require_approved_pr:
         branch = os.environ.get('CHECKOUT_BRANCH')
@@ -733,6 +783,8 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
     if (fingerprint(rendered(repo, DEV)) != candidate['development_fingerprint']
             or csms_image(repo, DEV) != candidate['image'] or not live_candidate(candidate['image'])):
         raise DeliveryPreflightError('Development no longer runs the verified candidate')
+    if 'development_images' in candidate and application_digest_snapshot(repo, DEV) != candidate['development_images']:
+        raise DeliveryPreflightError('Development digest combination changed after verification')
     job = kubectl('-n', 'dev', 'get', 'job', receipt['job'])
     if job['metadata']['uid'] != receipt['job_uid'] or job.get('status', {}).get('succeeded') != 1:
         raise DeliveryPreflightError('Successful verification job is missing or replaced')
@@ -740,6 +792,8 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
                 'previous_image': candidate['previous_production_image'], 'phase': 'prepared', 'canary': canary}
     if 'images' in candidate:
         delivery['images'] = candidate_images(candidate)
+    if 'release_images' in candidate:
+        delivery['release_images'] = candidate['release_images']
     if approval:
         delivery['source_approval'] = approval
     save(delivery_path, delivery)
@@ -751,6 +805,8 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
         delivery['workloads'] = application_workloads(repo, candidate_images(candidate), CANARY if canary else PROD)
     else:
         pin_image(repo, PROD, candidate['image'])
+    if 'release_images' in candidate and application_digest_snapshot(repo, PROD) != candidate['release_images']:
+        raise DeliveryPreflightError('Ops promotion does not match the verified release digest combination')
     if rendered(repo, DEV) != dev_before:
         raise DeliveryPreflightError('Production promotion changed development')
     revision = commit(repo, PROD, f'promote(ops): approved apps, CSMS canary {candidate["source"][:12]}',

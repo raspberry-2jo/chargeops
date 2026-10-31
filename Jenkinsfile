@@ -108,58 +108,17 @@ pipeline {
     stage('Detect changed images') {
       steps {
         script {
-          def diffOutput = sh(script: '''
+          sh '''
             set -eu
-            CURRENT_COMMIT="$(git rev-parse HEAD)"
-            BASE="${GIT_PREVIOUS_SUCCESSFUL_COMMIT:-}"
-            if [ -z "$BASE" ] || ! BASE="$(git rev-parse --verify --end-of-options "${BASE}^{commit}" 2>/dev/null)"; then
-              printf '%s\n' '__BUILD_ALL__'
-            else
-              git diff --name-only --no-renames "$BASE" "$CURRENT_COMMIT" -- \
-                "$APP_ROOT/" Jenkinsfile requirements-dev.txt pytest.ini scripts/ tests/
-            fi
-          ''', returnStdout: true).trim()
-          def changedFiles = diffOutput ? diffOutput.readLines().findAll { it } : []
-          def appPaths = [
-            'ai-gateway': 'chargeops-ai-gateway',
-            'chatops-bot': 'chargeops-chatops-bot',
-            'csms': 'chargeops-csms',
-            'notifier': 'chargeops-notifier',
-            'virtual-charger': 'chargeops-vcharger',
-            'collector': 'chargeops-collector'
-          ]
-          def allImages = appPaths.values().toList()
-          def selected = new LinkedHashSet()
-          def runTests = false
-          if (params.BUILD_ALL_IMAGES || changedFiles.contains('__BUILD_ALL__')) {
-            selected.addAll(allImages)
-            runTests = true
-            echo 'First build or BUILD_ALL_IMAGES=true: building all six images.'
-          } else {
-            changedFiles.each { path ->
-              if (path == 'Jenkinsfile' || path == 'scripts/ci.py' || path == 'scripts/trivy_gate.py' || path == 'scripts/trivy_exceptions.py' || path.startsWith('security/') || path == env.APP_ROOT + '/.dockerignore') {
-                selected.addAll(allImages)
-              } else if (path == 'requirements-dev.txt' || path == 'pytest.ini' || path.startsWith('scripts/') ||
-                         path.startsWith('tests/') || path.contains('/tests/') || path.contains('/test_')) {
-                runTests = true
-                echo 'Test-only change: ' + path
-              } else if (path.endsWith('.md') || path.endsWith('.sql') || path.endsWith('/.gitkeep')) {
-                echo 'Documentation/query-only change: ' + path
-              } else if (path.startsWith(env.APP_ROOT + '/common/')) {
-                selected.addAll(['chargeops-ai-gateway', 'chargeops-chatops-bot', 'chargeops-notifier'])
-              } else if (path.startsWith(env.APP_ROOT + '/')) {
-                def matched = appPaths.find { folder, image -> path.startsWith(env.APP_ROOT + '/' + folder + '/') }
-                if (matched) { selected.add(matched.value) }
-                else { selected.addAll(allImages) }
-              }
-            }
-          }
-          // CSMS remains the Dev verification anchor even for a notifier-only release.
-          if (params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true') {
-            selected.add('chargeops-csms')
-          }
-          env.APP_CHANGED = (runTests || !selected.isEmpty()).toString()
-          env.BUILD_IMAGES = selected.join(' ')
+            FORCE_OPTION=''
+            if [ "$BUILD_ALL_IMAGES" = 'true' ]; then FORCE_OPTION='--force-all'; fi
+            python3.12 scripts/image_selection.py --base "${GIT_PREVIOUS_SUCCESSFUL_COMMIT:-}" \
+              --output artifacts/image-selection.json $FORCE_OPTION
+          '''
+          def selection = new groovy.json.JsonSlurperClassic().parseText(readFile('artifacts/image-selection.json'))
+          // Keep the complete test suite, including CI-only and documentation changes.
+          env.APP_CHANGED = 'true'
+          env.BUILD_IMAGES = selection.selected.join(' ')
           echo 'Selected images: ' + (env.BUILD_IMAGES ?: '(none)')
         }
       }
@@ -179,8 +138,7 @@ pipeline {
       }
     }
     stage('Validate Dev RollingUpdate handover') {
-      when { expression { params.ENABLE_ENVIRONMENT_CD && params.DEV_DELIVERY_MODE == 'auto' && env.PUBLISH_IMAGES == 'true' &&
-        (env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms') } }
+      when { expression { params.ENABLE_ENVIRONMENT_CD && params.DEV_DELIVERY_MODE == 'auto' && env.PUBLISH_IMAGES == 'true' } }
       steps {
         withCredentials([file(credentialsId: params.DEV_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG')]) {
           script {
@@ -313,8 +271,7 @@ pipeline {
     stage('Development delivery and integration test') {
       when {
         expression {
-          params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' &&
-            (env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')
+          params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true'
         }
       }
       steps {
@@ -377,7 +334,7 @@ pipeline {
           file(credentialsId: params.DEV_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG')
         ]) {
           script {
-            if ((env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')) {
+            if (env.BUILD_IMAGES?.trim()) {
               // Existing-traffic policy needs no fixture; validate one only if
               // the optional active smoke metric has explicitly been installed.
               sh '.ci-venv/bin/python scripts/canary_cd.py check-fixture'
@@ -399,7 +356,7 @@ pipeline {
       when {
         expression {
           params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' && env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH &&
-            (env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')
+            env.BUILD_IMAGES?.trim()
         }
       }
       steps {
@@ -415,7 +372,7 @@ pipeline {
       when {
         expression {
           params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' && env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH &&
-            (env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms')
+            env.BUILD_IMAGES?.trim()
         }
       }
       steps {
@@ -497,7 +454,7 @@ pipeline {
           }
           def event = currentBuild.currentResult == 'SUCCESS' ? 'Pipeline succeeded' : (currentBuild.currentResult == 'ABORTED' ? 'Pipeline aborted' : 'Pipeline failed')
           notifyDelivery(event)
-          archiveArtifacts artifacts: 'artifacts/candidate.json,artifacts/verification.json,artifacts/dev-recovery.json,artifacts/production-delivery.json,artifacts/source-approval.json,artifacts/pull-request.json', allowEmptyArchive: true, fingerprint: true
+          archiveArtifacts artifacts: 'artifacts/image-selection.json,artifacts/candidate.json,artifacts/verification.json,artifacts/dev-recovery.json,artifacts/production-delivery.json,artifacts/source-approval.json,artifacts/pull-request.json', allowEmptyArchive: true, fingerprint: true
           sh 'rm -rf .ci-venv || true'
         }
       }

@@ -66,12 +66,12 @@ def test_build_contexts_and_app_syntax_are_valid():
     ci.validate_inputs()
 
 
-def test_groovy_image_map_matches_actual_build_declarations():
-    mappings = dict(re.findall(r"'([^']+)': '(chargeops[^']+)'", PIPELINE))
-    assert len(mappings) == 6
-    assert set(mappings.values()) == {image.name for image in IMAGES}
-    for folder, image in mappings.items():
-        assert next(item for item in IMAGES if item.name == image).dockerfile == f"apps/{folder}/Dockerfile"
+def test_selector_uses_actual_build_declarations_without_a_second_image_map():
+    assert len(IMAGES) == len({image.name for image in IMAGES}) == 6
+    assert 'scripts/image_selection.py' in DIFF
+    assert "selected.add('chargeops-csms')" not in PIPELINE
+    for image in IMAGES:
+        assert (ROOT / image.dockerfile).is_file()
     assert "APP_ROOT = 'apps'" in PIPELINE
     assert "PUBLISH_BRANCH = 'kim_chanju'" in PIPELINE
     assert "!env.CHANGE_ID" in PIPELINE
@@ -167,6 +167,11 @@ def test_diff_detects_root_pipeline_apps_and_tests_but_ignores_other_infra(bash,
     git("init", "-q")
     git("config", "user.name", "CI test")
     git("config", "user.email", "ci-test@example.invalid")
+    shutil.copy2(ROOT / 'Jenkinsfile', tmp_path / 'Jenkinsfile')
+    shutil.copytree(ROOT / 'apps', tmp_path / 'apps', ignore=shutil.ignore_patterns('__pycache__', '.venv'))
+    (tmp_path / 'scripts').mkdir()
+    for name in ('image_selection.py', 'ci.py'):
+        shutil.copy2(ROOT / 'scripts' / name, tmp_path / 'scripts' / name)
     (tmp_path / "initial.txt").write_text("initial")
     git("add", ".")
     git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "initial")
@@ -175,17 +180,22 @@ def test_diff_detects_root_pipeline_apps_and_tests_but_ignores_other_infra(bash,
     for name in included + ["infra/app/Jenkinsfile", "docs/note.md", "db/change.sql"]:
         file = tmp_path / name
         file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_text("changed\n")
+        file.write_text((file.read_text(encoding='utf-8') if file.exists() else '') + "\n# changed\n", encoding='utf-8')
     git("add", ".")
     git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "changed")
     env = os.environ.copy()
-    env.update(APP_ROOT="apps", GIT_PREVIOUS_SUCCESSFUL_COMMIT=base)
-    result = subprocess.run([bash], input=DIFF, cwd=tmp_path, env=env, text=True, capture_output=True)
+    env.update(APP_ROOT="apps", GIT_PREVIOUS_SUCCESSFUL_COMMIT=base, BUILD_ALL_IMAGES='false', PYTHON_FOR_TEST=Path(sys.executable).as_posix())
+    shell = 'python3.12() { "$PYTHON_FOR_TEST" "$@"; }\n' + DIFF
+    result = subprocess.run([bash], input=shell, cwd=tmp_path, env=env, text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
-    assert set(result.stdout.splitlines()) == set(included)
+    import json
+    selected = json.loads((tmp_path / 'artifacts/image-selection.json').read_text())
+    assert set(selected['selected']) == {'chargeops-ai-gateway', 'chargeops-chatops-bot', 'chargeops-notifier'}
+    assert set(included) <= set(selected['changed_files'])
     env["GIT_PREVIOUS_SUCCESSFUL_COMMIT"] = "missing-commit"
-    first = subprocess.run([bash], input=DIFF, cwd=tmp_path, env=env, text=True, capture_output=True)
-    assert first.returncode == 0 and first.stdout.strip() == "__BUILD_ALL__"
+    first = subprocess.run([bash], input=shell, cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert first.returncode == 0
+    assert len(json.loads((tmp_path / 'artifacts/image-selection.json').read_text())['selected']) == 6
 
 
 @pytest.mark.parametrize("folder", ["ai-gateway", "chatops-bot", "notifier"])
