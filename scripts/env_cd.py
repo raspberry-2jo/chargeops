@@ -5,6 +5,7 @@ No kubectl writes to ops here. Optional Canary Sync is handled by canary_cd.py.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -51,6 +52,72 @@ def poll_seconds():
     if not math.isfinite(value) or value <= 0:
         raise DeliveryPreflightError('CD_POLL_SECONDS must be a finite positive number')
     return value
+
+
+def iso_time(value=None):
+    return datetime.fromtimestamp(time.time() if value is None else value, timezone.utc).isoformat(timespec='milliseconds')
+
+
+class DevVerificationTiming:
+    """Observations only: never supplies readiness or success to the delivery gate."""
+    def __init__(self):
+        self.started = time.monotonic()
+        self.wall_started = time.time()
+        self.events = {}
+        self.target = None
+        self.initial_revision = None
+        self.revision_observed = False
+
+    def event(self, name, detail='', elapsed=None, at=None):
+        seconds = time.monotonic() - self.started if elapsed is None else elapsed
+        if name not in self.events:
+            self.events[name] = seconds
+        value = 'NA' if seconds == 'NA' else f'{seconds:.3f}s'
+        print(f'Dev timing: at={at or iso_time()} elapsed={value} event={name}'
+              + (' ' + detail if detail else ''), flush=True)
+
+    def commit(self, candidate):
+        revision = candidate.get('development_revision', '')
+        self.target = revision if isinstance(revision, str) and re.fullmatch(r'[a-f0-9]{40}', revision) else None
+        committed = candidate.get('development_committed_at')
+        try:
+            value = datetime.fromisoformat(committed)
+            if value.tzinfo is None:
+                raise ValueError('Timezone required')
+            seconds = value.timestamp() - self.wall_started
+        except (TypeError, ValueError):
+            self.event('git_commit_completed', 'timestamp=unavailable', elapsed='NA')
+        else:
+            self.event('git_commit_completed', 'source=candidate_metadata', elapsed=seconds, at=value.isoformat(timespec='milliseconds'))
+
+    def observe(self, progress, candidate_ready=False):
+        revision = progress.get('revision')
+        if self.initial_revision is None and revision:
+            self.initial_revision = revision
+        changed = bool(revision and self.initial_revision and revision != self.initial_revision)
+        exact = bool(self.target and revision == self.target)
+        self.revision_observed = self.revision_observed or exact
+        if ('argo_detected' not in self.events and
+                (progress['sync'] == 'OutOfSync' or changed or exact)):
+            self.event('argo_detected', 'signal=' + ('candidate_revision' if exact else 'revision_changed' if changed else 'out_of_sync'))
+        # An old Synced/Healthy observation is not a candidate milestone.
+        # Exact image readiness remains the existing gate, not this telemetry.
+        bound = self.revision_observed or candidate_ready
+        if bound and progress['sync'] == 'Synced' and 'synced' not in self.events:
+            self.event('synced', 'source=' + ('candidate_revision' if self.revision_observed else 'exact_candidate_ready'))
+        if bound and progress['sync'] == 'Synced' and progress['health'] == 'Healthy' and 'healthy' not in self.events:
+            self.event('healthy', 'source=' + ('candidate_revision' if self.revision_observed else 'exact_candidate_ready'))
+
+    def summary(self, outcome):
+        def duration(end, start=None):
+            right = self.events.get(end)
+            left = self.events.get(start) if start else 0
+            return f'{max(0, right-left):.3f}s' if isinstance(right, (int, float)) and isinstance(left, (int, float)) else 'NA'
+        print(f'Dev timing summary: at={iso_time()} detect={duration("argo_detected")}'
+              f' sync={duration("synced", "argo_detected")} healthy={duration("healthy", "synced")}'
+              f' job={duration("job_completed" if "job_completed" in self.events else "job_wait_ended", "job_created")}'
+              f' total={time.monotonic()-self.started:.3f}s'
+              f' outcome={outcome}', flush=True)
 
 
 def urlopen(request, timeout=30):
@@ -357,7 +424,10 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False, bu
     candidate['development_fingerprint'] = fingerprint(rendered(repo, DEV))
     candidate['development_revision'] = commit(repo, DEV, f'build(dev): verify CSMS {tag}',
                                               allow_gate_baseline=True)
+    candidate['development_committed_at'] = iso_time()
     save(output, candidate)
+    print('Dev timing: at=' + candidate['development_committed_at']
+          + ' elapsed=NA event=git_commit_completed verify=not_started', flush=True)
     print('Development digest committed; production unchanged')
 
 
@@ -485,7 +555,8 @@ def verification_job(candidate):
 def dev_progress():
     app = kubectl('-n', 'argocd', 'get', 'application', APPLICATION).get('status', {})
     progress = {'sync': app.get('sync', {}).get('status', 'Unknown'),
-                'health': app.get('health', {}).get('status', 'Unknown')}
+                'health': app.get('health', {}).get('status', 'Unknown'),
+                'revision': app.get('sync', {}).get('revision')}
     if DEV == CANARY_DEV:
         rollout = kubectl('-n', 'dev', 'get', 'rollout', 'csms')
         state = rollout.get('status', {})
@@ -509,6 +580,16 @@ def log_dev_progress(started, timeout, progress=None):
 
 
 def verify(repo, candidate_path, receipt_path, timeout):
+    timing = DevVerificationTiming()
+    outcome = 'failed'
+    try:
+        _verify(repo, candidate_path, receipt_path, timeout, timing)
+        outcome = 'success'
+    finally:
+        timing.summary(outcome)
+
+
+def _verify(repo, candidate_path, receipt_path, timeout, timing):
     candidate = load(candidate_path)
     candidate_check(candidate)
     ensure_clean(repo)
@@ -517,6 +598,7 @@ def verify(repo, candidate_path, receipt_path, timeout):
     if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,252}', APPLICATION):
         raise DeliveryPreflightError('DEV_ARGO_APPLICATION must be a Kubernetes resource name')
     print('Checking Dev Application=' + APPLICATION + ', namespace=dev, path=' + DEV, flush=True)
+    timing.commit(candidate)
     started = time.monotonic()
     interval = poll_seconds()
     deadline = started + timeout
@@ -526,8 +608,6 @@ def verify(repo, candidate_path, receipt_path, timeout):
         if dev_rollout_failed(candidate['image']):
             raise DeliveryPreflightError('Dev RollingUpdate failed; Dev recovery is required' if DEV == ROLLING_DEV else
                                          'Dev Canary analysis aborted the candidate; Dev recovery is required')
-        if live_candidate(candidate['image']):
-            break
         try:
             progress = dev_progress()
         except (DeliveryPreflightError, RuntimeError):
@@ -536,6 +616,10 @@ def verify(repo, candidate_path, receipt_path, timeout):
             if DEV == CANARY_DEV:
                 progress.update(rollout='Unknown', step=0, steps=0, ready=0, desired=0,
                                 analysis='none', analysis_phase='none')
+        ready = live_candidate(candidate['image'])
+        timing.observe(progress, candidate_ready=ready)
+        if ready:
+            break
         if progress != last_progress or time.monotonic() >= next_progress:
             log_dev_progress(started, timeout, progress)
             last_progress = progress
@@ -547,7 +631,22 @@ def verify(repo, candidate_path, receipt_path, timeout):
     job = verification_job(candidate)
     name = job['metadata']['name']
     run('kubectl', 'create', '-f', '-', payload=json.dumps(job))
-    run('kubectl', '-n', 'dev', 'wait', '--for=condition=complete', f'job/{name}', '--timeout=270s')
+    timing.event('job_created', 'job=' + name)
+    try:
+        run('kubectl', '-n', 'dev', 'wait', '--for=condition=complete', f'job/{name}', '--timeout=270s')
+    except Exception:
+        # Preserve the original wait exception and verdict; diagnostics are best effort.
+        outcome = 'wait_failed_or_timeout'
+        try:
+            state = kubectl('-n', 'dev', 'get', 'job', name).get('status', {})
+            if any(c.get('type') == 'Failed' and c.get('status') == 'True' for c in state.get('conditions', [])):
+                outcome = 'failed'
+        except Exception:
+            pass
+        timing.event('job_completed' if outcome == 'failed' else 'job_wait_ended',
+                     'job=' + name + ' outcome=' + outcome)
+        raise
+    timing.event('job_completed', 'job=' + name + ' outcome=success')
     result = kubectl('-n', 'dev', 'get', 'job', name)
     print(run('kubectl', '-n', 'dev', 'logs', f'job/{name}', '--all-containers=true'))
     if not live_candidate(candidate['image']):
