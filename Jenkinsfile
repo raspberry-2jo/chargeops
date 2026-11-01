@@ -32,6 +32,8 @@ pipeline {
   parameters {
     booleanParam(name: 'BUILD_ALL_IMAGES', defaultValue: false,
       description: 'Build all six images. The first build automatically builds all images.')
+    choice(name: 'IMAGE_BUILD_PARALLELISM', choices: ['2', '1', '3', '4', '6'],
+      description: 'Maximum concurrent image builds on mgmt-agent. 1 runs sequentially; scanning and delivery remain sequential.')
     booleanParam(name: 'ENABLE_ENVIRONMENT_CD', defaultValue: true,
       description: 'Verify CSMS in Dev, wait for source approval+merge, then deploy built app digests to ops; only CSMS uses Canary.')
     booleanParam(name: 'ENABLE_CANARY', defaultValue: true,
@@ -176,14 +178,47 @@ pipeline {
               *) echo "Unknown image: $NAME" >&2; exit 1 ;;
             esac
           done
+          BUILD_LIMIT="${IMAGE_BUILD_PARALLELISM:-2}"
+          case "$BUILD_LIMIT" in
+            1|2|3|4|6) ;;
+            *) echo 'Invalid IMAGE_BUILD_PARALLELISM' >&2; exit 1 ;;
+          esac
+          echo "Image builds: maximum concurrency=$BUILD_LIMIT (same mgmt-agent)"
+          BUILD_PIDS=''
+          # Wait for every started build, including when one fails. No gate or
+          # publication starts while a background build remains active.
+          wait_builds() {
+            BUILD_STATUS=0
+            for BUILD_PID in $BUILD_PIDS; do
+              if wait "$BUILD_PID"; then :; else
+                BUILD_EXIT=$?
+                if [ "$BUILD_STATUS" -eq 0 ]; then BUILD_STATUS=$BUILD_EXIT; fi
+              fi
+            done
+            BUILD_PIDS=''
+            BUILD_ACTIVE=0
+            return "$BUILD_STATUS"
+          }
+          stop_builds() {
+            for BUILD_PID in $BUILD_PIDS; do kill "$BUILD_PID" 2>/dev/null || :; done
+            for BUILD_PID in $BUILD_PIDS; do wait "$BUILD_PID" 2>/dev/null || :; done
+          }
+          trap stop_builds EXIT
+          trap 'exit 143' TERM
+          trap 'exit 130' INT
+          BUILD_ACTIVE=0
           build_if_selected() {
             NAME="$1"
             DOCKERFILE="$2"
             CONTEXT="$3"
             case " $BUILD_IMAGES " in
               *" $NAME "*)
+                echo "Starting image build: $NAME"
                 docker build --pull -f "$DOCKERFILE" \
-                  -t "$REGISTRY/$NAME:$IMAGE_TAG" "$CONTEXT"
+                  -t "$REGISTRY/$NAME:$IMAGE_TAG" "$CONTEXT" &
+                BUILD_PIDS="$BUILD_PIDS $!"
+                BUILD_ACTIVE=$((BUILD_ACTIVE + 1))
+                if [ "$BUILD_ACTIVE" -ge "$BUILD_LIMIT" ]; then wait_builds; fi
                 ;;
             esac
           }
@@ -193,6 +228,7 @@ pipeline {
           build_if_selected chargeops-notifier apps/notifier/Dockerfile apps
           build_if_selected chargeops-vcharger apps/virtual-charger/Dockerfile apps
           build_if_selected chargeops-collector apps/collector/Dockerfile apps
+          wait_builds
         '''
       }
     }

@@ -42,8 +42,8 @@ def build_with_stub(bash, tmp_path, names, publish=True, branch="kim_chanju", ch
                CHECKOUT_BRANCH=branch, CHANGE_ID=change_id, FAIL_BUILD=str(int(fail)),
                PUBLISH_DEV_TAG=str(publish_dev_tag).lower(), BUILD_NUMBER='12', FAIL_GATE=str(int(fail_gate)))
     stub = '''docker() {
-      printf '%s\t' "$@" >> "$CALL_LOG"
-      printf '\n' >> "$CALL_LOG"
+      CALL_LINE=$(printf '%s\t' "$@")
+      printf '%s\n' "$CALL_LINE" >> "$CALL_LOG"
       if [ "$1" = build ] && [ "$FAIL_BUILD" = 1 ]; then return 31; fi
     }
     python3.12() {
@@ -107,7 +107,7 @@ def test_all_builds_finish_before_any_image_is_published(bash, tmp_path):
 def test_build_failure_prevents_all_pushes(bash, tmp_path):
     result, calls = build_with_stub(bash, tmp_path, [image.name for image in IMAGES], fail=True)
     assert result.returncode == 31
-    assert [call[0] for call in calls] == ["build"]
+    assert [call[0] for call in calls] == ["build"] * 2
 
 
 def test_trivy_failure_prevents_all_registry_pushes(bash,tmp_path):
