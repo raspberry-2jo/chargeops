@@ -313,7 +313,7 @@ def workload_containers(document):
 def candidate_images(candidate):
     images = candidate.get('images', {IMAGE: candidate['image']})
     built = declared_built_images(candidate)
-    csms_required = built is None or 'chargeops-csms' in built
+    csms_required = 'ops_images' not in candidate and (built is None or 'chargeops-csms' in built)
     if (not isinstance(images, dict) or csms_required and images.get(IMAGE) != candidate['image']
             or IMAGE in images and images[IMAGE] != candidate['image']):
         raise DeliveryPreflightError('Release images must include the verified CSMS digest')
@@ -336,6 +336,8 @@ def declared_built_images(candidate):
 
 
 def selected_candidate_images(candidate):
+    if 'ops_images' in candidate:
+        return checked_image_map(candidate['ops_images'])
     images = candidate_images(candidate)
     if 'built_images' not in candidate:
         return images  # Existing CSMS-only candidate/receipt compatibility.
@@ -349,8 +351,55 @@ def selected_candidate_images(candidate):
 
 
 def csms_canary_scope(candidate):
+    if 'ops_images' in candidate or 'previous_production_images' in candidate:
+        return IMAGE in ops_changed_images(candidate)
     names = declared_built_images(candidate)
     return names is None or 'chargeops-csms' in names
+
+
+def checked_image_map(images):
+    if not isinstance(images, dict):
+        raise DeliveryPreflightError('Invalid Ops digest map')
+    for repository, reference in images.items():
+        if repository not in IMAGE_ALIASES or not isinstance(reference, str) or not re.fullmatch(
+                re.escape(repository) + r'@sha256:[a-f0-9]{64}', reference):
+            raise DeliveryPreflightError('Invalid Ops pinned application digest')
+    return images
+
+
+def ops_changed_images(candidate):
+    if 'ops_images' in candidate:
+        return checked_image_map(candidate['ops_images'])
+    if candidate.get('built_images') == []:
+        return {}  # CI-only builds remain verification-only.
+    if 'previous_production_images' in candidate:
+        previous = checked_image_map(candidate['previous_production_images'])
+        target = checked_image_map(candidate['release_images'])
+        if target.get(IMAGE) != candidate['image']:
+            raise DeliveryPreflightError('Ops target CSMS differs from the verified Dev digest')
+        return {name: ref for name, ref in target.items() if previous.get(name) != ref}
+    return selected_candidate_images(candidate)  # Existing receipt compatibility.
+
+
+def ops_plan(repo, candidate):
+    if production_fingerprint(repo) != candidate['production_fingerprint']:
+        raise DeliveryPreflightError('Production changed while approval was pending')
+    current = application_digest_snapshot(repo, PROD)
+    changes = {name: ref for name, ref in ops_changed_images(candidate).items() if current.get(name) != ref}
+    if 'previous_production_images' in candidate:
+        if current != candidate['previous_production_images']:
+            raise DeliveryPreflightError('Ops digest baseline changed after Dev verification')
+    names = sorted(name.rsplit('/', 1)[-1] for name in changes)
+    canary = IMAGE in changes
+    print('ops changes: ' + (', '.join(names) or '(none)'), flush=True)
+    if candidate.get('built_images') == []:
+        print('canary skipped: verification-only build; no Ops promotion authorized', flush=True)
+    elif not canary:
+        print('canary skipped: ops csms digest unchanged ' + candidate['image'].split('@')[-1], flush=True)
+    if not names:
+        print('Ops promote skipped: no Ops digest changes', flush=True)
+    return {'images': changes, 'changed_images': names, 'canary': canary,
+            'candidate': fingerprint(candidate), 'production_fingerprint': candidate['production_fingerprint']}
 
 
 def application_digest_snapshot(repo, overlay):
@@ -373,7 +422,7 @@ def application_digest_snapshot(repo, overlay):
 
 
 def pin_application_images(repo, images):
-    """Pin only selected apps in prod, including the legacy collector image alias."""
+    """Pin changed Ops apps, including the legacy collector image alias."""
     path = Path(repo) / PROD / 'kustomization.yaml'
     data = yaml.safe_load(path.read_text(encoding='utf-8'))
     documents = rendered(repo, PROD)
@@ -514,10 +563,8 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False, bu
         raise DeliveryPreflightError('Unknown image selected for application delivery')
     previous_dev = csms_image(repo, DEV)
     csms_selected = selected is None or 'chargeops-csms' in selected
-    if not csms_selected:
-        canary = False
-        print('canary skipped: ' + ('chargeops-csms unchanged' if selected else 'no image changes'), flush=True)
     candidate_image = resolve_digest(IMAGE + ':' + tag) if csms_selected else previous_dev
+    canary = bool(canary and candidate_image != prod_image and selected != set())
     if not re.fullmatch(re.escape(IMAGE) + r'@sha256:[a-f0-9]{64}', candidate_image):
         raise DeliveryPreflightError('Current Dev CSMS must be digest-pinned when not rebuilt')
     candidate = {'schema': 1, 'source': source, 'build_tag': tag, 'image': candidate_image,
@@ -532,9 +579,12 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False, bu
         candidate['images'] = images
         candidate['built_images'] = sorted(selected)
         # Bind unchanged application digests too, without rebuilding or repinning them.
-        candidate['release_images'] = application_digest_snapshot(repo, PROD)
-        candidate['release_images'].update(images)
+        candidate['previous_production_images'] = application_digest_snapshot(repo, PROD)
         candidate['previous_development_images'] = application_digest_snapshot(repo, DEV)
+        candidate['release_images'] = dict(candidate['previous_production_images'])
+        candidate['release_images'].update(candidate['previous_development_images'])
+        candidate['release_images'].update(images)
+        candidate['release_images'][IMAGE] = candidate['image']
         candidate['development_images'] = dict(candidate['previous_development_images'])
         candidate['development_images'][IMAGE] = candidate['image']
         candidate_images(candidate)
@@ -873,9 +923,13 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
     if candidate.get('built_images') == []:
         print('Ops promote skipped: no image changes; canary skipped: no image changes', flush=True)
         return
-    if not csms_canary_scope(candidate):
-        canary = False
-        print('canary skipped: chargeops-csms unchanged', flush=True)
+    ensure_clean(repo)
+    plan = ops_plan(repo, candidate)
+    if not plan['changed_images']:
+        return
+    if plan['canary'] and not canary:
+        raise DeliveryPreflightError('CSMS Ops digest change requires Canary authorization')
+    canary = plan['canary']
     approval = None
     if require_approved_pr:
         branch = os.environ.get('CHECKOUT_BRANCH')
@@ -905,7 +959,9 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
     if 'built_images' in candidate:
         delivery['built_images'] = candidate['built_images']
     if 'images' in candidate:
-        delivery['images'] = selected_candidate_images(candidate)
+        delivery['images'] = plan['images']
+    delivery['ops_images'] = plan['images']
+    delivery['ops_changes'] = plan['changed_images']
     if 'release_images' in candidate:
         delivery['release_images'] = candidate['release_images']
     if approval:
@@ -915,8 +971,8 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
     if canary:
         stamp_gate_baseline(repo, PROD)
     if 'images' in candidate:
-        pin_application_images(repo, selected_candidate_images(candidate))
-        delivery['workloads'] = application_workloads(repo, selected_candidate_images(candidate), CANARY if canary else PROD)
+        pin_application_images(repo, plan['images'])
+        delivery['workloads'] = application_workloads(repo, plan['images'], CANARY if canary else PROD)
     else:
         pin_image(repo, PROD, candidate['image'])
     if 'release_images' in candidate and application_digest_snapshot(repo, PROD) != candidate['release_images']:
@@ -949,10 +1005,11 @@ def reset_artifacts(preserve_delivery=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['prepare', 'verify', 'promote', 'describe', 'reset', 'recover-dev', 'dev-overlay'])
+    parser.add_argument('command', choices=['prepare', 'verify', 'promote', 'plan-ops', 'describe', 'reset', 'recover-dev', 'dev-overlay'])
     parser.add_argument('--repo', default='.gitops-delivery')
     parser.add_argument('--candidate', default='artifacts/candidate.json')
     parser.add_argument('--receipt', default='artifacts/verification.json')
+    parser.add_argument('--output', default='artifacts/ops-plan.json')
     parser.add_argument('--delivery', default='artifacts/production-delivery.json')
     parser.add_argument('--dev-recovery', default='artifacts/dev-recovery.json')
     parser.add_argument('--tag')
@@ -970,6 +1027,11 @@ def main():
     elif args.command == 'verify':
         timeout = args.timeout if args.timeout is not None else (900 if DEV == CANARY_DEV else 600)
         verify(args.repo, args.candidate, args.receipt, timeout)
+    elif args.command == 'plan-ops':
+        candidate = load(args.candidate)
+        validate_receipt(candidate, load(args.receipt), int(time.time()))
+        ensure_clean(args.repo)
+        save(args.output, ops_plan(args.repo, candidate))
     elif args.command == 'promote':
         promote(args.repo, args.candidate, args.receipt, args.delivery, args.canary, args.require_approved_pr)
     elif args.command == 'reset':

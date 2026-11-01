@@ -115,13 +115,13 @@ def test_cli_explains_fixed_validation_failure():
 
 
 def test_promotion_uses_verified_digest_without_registry_lookup(repo, tmp_path, monkeypatch):
-    candidate = prepared(repo, tmp_path, monkeypatch)
+    candidate = prepared(repo, tmp_path, monkeypatch, canary=True)
     receipt = tmp_path / 'receipt.json'
     cd.save(receipt, receipt_for(candidate))
     monkeypatch.setattr(cd, 'resolve_digest', lambda reference: pytest.fail('Promotion must not resolve a mutable tag'))
     monkeypatch.setattr(cd, 'live_candidate', lambda image: image == B)
     monkeypatch.setattr(cd, 'kubectl', lambda *args: {'metadata': {'uid': 'test-job-uid'}, 'status': {'succeeded': 1}})
-    cd.promote(repo, candidate, receipt, tmp_path / 'production-delivery.json')
+    cd.promote(repo, candidate, receipt, tmp_path / 'production-delivery.json', canary=True)
     assert cd.csms_image(repo, cd.PROD) == B
     assert cd.csms_image(repo, cd.DEV) == B
     assert cd.run('git', 'diff', '--name-only', 'HEAD~1', 'HEAD', cwd=repo) == cd.PROD + '/kustomization.yaml'
@@ -195,7 +195,7 @@ def test_single_job_waits_for_reviewed_merge_after_verification_before_productio
     assert "name: 'ENABLE_ENVIRONMENT_CD', defaultValue: true" in pipeline
     assert "name: 'ENABLE_CANARY', defaultValue: true" in pipeline
     assert "error('CSMS Ops delivery requires ENABLE_CANARY=true')" in pipeline
-    assert "if ((env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms') && !params.ENABLE_CANARY)" in pipeline
+    assert "if (env.RUN_CSMS_CANARY == 'true' && !params.ENABLE_CANARY)" in pipeline
     assert "stage('Ops regular deployment verification')" in pipeline
 
 

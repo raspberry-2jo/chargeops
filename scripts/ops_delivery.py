@@ -34,7 +34,7 @@ def validate_workloads(workloads):
 def preflight(repo, candidate_path):
     candidate = cd.load(candidate_path)
     cd.candidate_check(candidate)
-    if cd.csms_canary_scope(candidate) or not cd.selected_candidate_images(candidate):
+    if cd.csms_canary_scope(candidate) or not cd.ops_changed_images(candidate):
         raise cd.DeliveryPreflightError('Regular Ops preflight requires changed non-CSMS apps')
     cd.ensure_clean(repo)
     if cd.production_fingerprint(repo) != candidate['production_fingerprint']:

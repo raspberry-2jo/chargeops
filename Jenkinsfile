@@ -83,6 +83,8 @@ pipeline {
         script {
           env.DEV_CHECK_STATE = 'not_started'
           env.HAS_SELECTED_IMAGES = 'false'
+          env.HAS_OPS_CHANGES = 'false'
+          env.RUN_CSMS_CANARY = 'false'
           env.DEV_GITOPS_OVERLAY = params.DEV_DELIVERY_MODE == 'canary' ? 'chargeops-chatops/overlays/development-canary' :
             (params.DEV_DELIVERY_MODE == 'deployment' ? 'chargeops-chatops/overlays/development' : 'chargeops-chatops/overlays/development-rolling')
           def checkoutVars = checkout scm
@@ -139,13 +141,13 @@ pipeline {
           env.APP_CHANGED = 'true'
           env.BUILD_IMAGES = selection.selected.join(' ')
           env.HAS_SELECTED_IMAGES = (!selection.selected.isEmpty()).toString()
-          env.RUN_CSMS_CANARY = (params.ENABLE_CANARY && selection.selected.contains('chargeops-csms')).toString()
+          // Ops Canary scope is computed after Dev verification from actual digest differences.
           echo 'Selected images: ' + (env.BUILD_IMAGES ?: '(none)')
           if (selection.selected.isEmpty()) {
             echo 'Image build/scan/push skipped: no image changes; Dev verifies current digests only'
             echo 'Source PR, approval wait, Ops promote and canary skipped: no image changes'
-          } else if (!selection.selected.contains('chargeops-csms')) {
-            echo 'canary skipped: chargeops-csms unchanged'
+          } else {
+            echo 'Ops Canary decision pending: compare verified Dev target with Ops digests'
           }
         }
       }
@@ -370,7 +372,7 @@ pipeline {
               OCPP_OPTION=''
               if [ "$RUN_OCPP_FIXTURE_TEST" = 'true' ]; then OCPP_OPTION='--ocpp-fixture-test'; fi
               CANARY_OPTION=''
-              if [ "$RUN_CSMS_CANARY" = 'true' ]; then CANARY_OPTION='--canary'; fi
+              if [ "$ENABLE_CANARY" = 'true' ]; then CANARY_OPTION='--canary'; fi
               if [ -z "${BUILD_IMAGES:-}" ]; then
                 echo 'Dev verification-only: current digests; no GitOps commit'
                 .ci-venv/bin/python scripts/env_cd.py prepare --verify-current --tag "$IMAGE_TAG" --source "$(git rev-parse HEAD)" $OCPP_OPTION
@@ -378,9 +380,14 @@ pipeline {
                 .ci-venv/bin/python scripts/env_cd.py prepare --tag "$IMAGE_TAG" --source "$(git rev-parse HEAD)" --images "${BUILD_IMAGES:-}" $OCPP_OPTION $CANARY_OPTION
               fi
               .ci-venv/bin/python scripts/env_cd.py verify
+              .ci-venv/bin/python scripts/env_cd.py plan-ops
             '''
           }
           script {
+            def opsPlan = readJSON(file: 'artifacts/ops-plan.json', returnPojo: true)
+            env.HAS_OPS_CHANGES = (!opsPlan.changed_images.isEmpty()).toString()
+            env.RUN_CSMS_CANARY = opsPlan.canary.toString()
+            if (opsPlan.canary && !params.ENABLE_CANARY) { error('CSMS Ops delivery requires ENABLE_CANARY=true') }
             githubStatus('success')
             env.DEV_CHECK_STATE = 'success'
             notifyDelivery('Dev verification passed')
@@ -440,12 +447,12 @@ pipeline {
       when {
         expression {
           params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' && env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH &&
-            env.HAS_SELECTED_IMAGES == 'true'
+            env.HAS_OPS_CHANGES == 'true'
         }
       }
       steps {
         script {
-          if ((env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms') && !params.ENABLE_CANARY) {
+          if (env.RUN_CSMS_CANARY == 'true' && !params.ENABLE_CANARY) {
             error('CSMS Ops delivery requires ENABLE_CANARY=true')
           }
           if (env.RUN_CSMS_CANARY == 'true') {
@@ -485,7 +492,7 @@ pipeline {
               }
             }
           } else {
-            echo 'canary skipped: chargeops-csms unchanged'
+            echo 'canary skipped: ops csms digest unchanged (see ops-plan.json)'
             stage('Ops regular deployment verification') {
               withCredentials([file(credentialsId: params.CANARY_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG'),
                 usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
@@ -539,7 +546,7 @@ pipeline {
           }
           def event = currentBuild.currentResult == 'SUCCESS' ? 'Pipeline succeeded' : (currentBuild.currentResult == 'ABORTED' ? 'Pipeline aborted' : 'Pipeline failed')
           notifyDelivery(event)
-          archiveArtifacts artifacts: 'artifacts/comparison-base.json,artifacts/image-selection.json,artifacts/candidate.json,artifacts/verification.json,artifacts/dev-recovery.json,artifacts/production-delivery.json,artifacts/source-approval.json,artifacts/pull-request.json', allowEmptyArchive: true, fingerprint: true
+          archiveArtifacts artifacts: 'artifacts/ops-plan.json,artifacts/comparison-base.json,artifacts/image-selection.json,artifacts/candidate.json,artifacts/verification.json,artifacts/dev-recovery.json,artifacts/production-delivery.json,artifacts/source-approval.json,artifacts/pull-request.json', allowEmptyArchive: true, fingerprint: true
           sh 'rm -rf .ci-venv || true'
         }
       }

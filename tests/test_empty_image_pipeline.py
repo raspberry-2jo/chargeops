@@ -49,7 +49,7 @@ def guard(stage, env, params):
 @pytest.mark.parametrize('selection,canary', [('', False), ('chargeops-csms', True), ('chargeops-notifier', False)])
 def test_stage_execution_matrix(selection, canary):
     env = SimpleNamespace(HAS_SELECTED_IMAGES=str(bool(selection)).lower(), PUBLISH_IMAGES='true',
-                          CHECKOUT_BRANCH='kim_chanju', PUBLISH_BRANCH='kim_chanju', SOURCE_COMMIT='c' * 40)
+                          HAS_OPS_CHANGES=str(bool(selection)).lower(), CHECKOUT_BRANCH='kim_chanju', PUBLISH_BRANCH='kim_chanju', SOURCE_COMMIT='c' * 40)
     params = SimpleNamespace(ECR_MIRROR=True, ENABLE_ENVIRONMENT_CD=True)
     for name in ('Docker Build: changed images only', 'Trivy Quality Gate', 'Registry Push: scanned images only',
                  'ECR mirror push', 'Create source PR for dev approval', 'Wait for source PR approval and merge',

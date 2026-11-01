@@ -51,7 +51,7 @@ def test_requested_canary_only_authorizes_selected_csms(apps, tmp_path, monkeypa
         assert delivery.read_bytes() == saved
 
 
-def test_notifier_delivery_does_not_promote_dev_csms_anchor(apps, tmp_path, monkeypatch):
+def test_notifier_delivery_promotes_verified_dev_csms_with_canary(apps, tmp_path, monkeypatch):
     cd.pin_image(apps, cd.PROD, B)
     cd.commit(apps, cd.PROD, 'distinct Ops CSMS baseline')
     monkeypatch.setattr(cd, 'resolve_digest', lambda ref: N)
@@ -59,8 +59,9 @@ def test_notifier_delivery_does_not_promote_dev_csms_anchor(apps, tmp_path, monk
     cd.prepare(apps, 'build-86-abcdef012345', 'c' * 40, path, canary=True, build_images='chargeops-notifier')
     run_existing_verification(apps, path, receipt, monkeypatch)
     cd.promote(apps, path, receipt, delivery, canary=True)
-    assert cd.csms_image(apps, cd.DEV) == A and cd.csms_image(apps, cd.PROD) == B
-    assert cd.IMAGE not in cd.load(delivery)['images']
+    assert cd.csms_image(apps, cd.DEV) == A and cd.csms_image(apps, cd.PROD) == A
+    assert cd.load(delivery)['images'][cd.IMAGE] == A
+    assert cd.load(delivery)['canary'] is True
 
 
 def test_zero_images_preserve_delivery_bytes_through_reset_promote_and_canary(apps, tmp_path, monkeypatch):
@@ -142,9 +143,9 @@ def test_regular_delivery_runs_regular_wait_and_never_recovery(apps, tmp_path, m
 
 
 @pytest.mark.parametrize('selection,flag', [('chargeops-csms', 'true'), ('chargeops-notifier', 'false'), ('', 'false')])
-def test_pipeline_shell_only_passes_canary_for_selected_csms(tmp_path, selection, flag):
+def test_pipeline_prepare_captures_canary_policy_independent_of_build_selection(tmp_path, selection, flag):
     pipeline = (ROOT / 'Jenkinsfile').read_text(encoding='utf-8')
-    assert "env.RUN_CSMS_CANARY = (params.ENABLE_CANARY && selection.selected.contains('chargeops-csms')).toString()" in pipeline
+    assert "env.RUN_CSMS_CANARY = opsPlan.canary.toString()" in pipeline
     blocks = re.findall(r"sh(?:\(script:)?\s*'''(.*?)'''", pipeline, re.S)
     script = next(b for b in blocks if 'scripts/env_cd.py prepare' in b)
     executable = Path('C:/Program Files/Git/bin/bash.exe')
@@ -161,9 +162,10 @@ def test_pipeline_shell_only_passes_canary_for_selected_csms(tmp_path, selection
     result = subprocess.run([bash], input=prefix + script, cwd=tmp_path, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     commands = log.read_text().splitlines()
-    assert ('--canary' in commands[0]) is (flag == 'true')
+    assert ('--canary' in commands[0]) is bool(selection)
     assert ('--verify-current' in commands[0]) is (not selection)
     assert commands[1] == 'scripts/env_cd.py verify'
+    assert commands[2] == 'scripts/env_cd.py plan-ops'
 
 
 def test_verify_current_does_not_resolve_pin_or_commit_and_runs_integration(apps, tmp_path, monkeypatch):

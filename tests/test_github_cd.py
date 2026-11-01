@@ -271,7 +271,7 @@ def test_unapproved_dev_stops_before_writing_ops(repo, tmp_path, monkeypatch):
     monkeypatch.delenv('CHANGE_ID', raising=False)
     fixture_api(monkeypatch, reviews=[])
     with pytest.raises(cd.DeliveryPreflightError, match='approved'):
-        cd.promote(repo, candidate, receipt, tmp_path / 'delivery.json', require_approved_pr=True)
+        cd.promote(repo, candidate, receipt, tmp_path / 'delivery.json', canary=True, require_approved_pr=True)
     assert cd.csms_image(repo, cd.PROD) == A
 
 
