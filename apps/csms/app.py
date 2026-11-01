@@ -570,4 +570,3 @@ async def watch(cid: str, req: WatchReq, x_api_token: str | None = Header(None),
             await connected[cid].call(call.ChangeConfiguration(key="MeterValueSampleInterval", value="10"))
     asyncio.create_task(revert())
     return {"interval": req.interval, "until": time.time() + req.seconds}
-# exp4-1
