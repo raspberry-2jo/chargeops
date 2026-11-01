@@ -34,6 +34,8 @@ pipeline {
       description: 'Build all six images. The first build automatically builds all images.')
     choice(name: 'IMAGE_BUILD_PARALLELISM', choices: ['2', '1', '3', '4', '6'],
       description: 'Maximum concurrent image builds on mgmt-agent. 1 runs sequentially; scanning and delivery remain sequential.')
+    string(name: 'JENKINS_READ_CREDENTIAL_ID', defaultValue: '',
+      description: 'Optional Jenkins username/API-token credential with Job Read for lastSuccessfulBuild fallback. Empty uses anonymous API; unavailable history safely builds all images.')
     booleanParam(name: 'ENABLE_ENVIRONMENT_CD', defaultValue: true,
       description: 'Verify CSMS in Dev, wait for source approval+merge, then deploy built app digests to ops; only CSMS uses Canary.')
     booleanParam(name: 'ENABLE_CANARY', defaultValue: true,
@@ -83,6 +85,8 @@ pipeline {
           env.DEV_GITOPS_OVERLAY = params.DEV_DELIVERY_MODE == 'canary' ? 'chargeops-chatops/overlays/development-canary' :
             (params.DEV_DELIVERY_MODE == 'deployment' ? 'chargeops-chatops/overlays/development' : 'chargeops-chatops/overlays/development-rolling')
           def checkoutVars = checkout scm
+          // Capture the primary SCM result before any later GitOps checkout.
+          env.CHECKOUT_PREVIOUS_SUCCESSFUL_COMMIT = (checkoutVars.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?: '').trim()
           env.CHECKOUT_BRANCH = (env.BRANCH_NAME ?: checkoutVars.GIT_BRANCH ?: env.GIT_BRANCH ?: '')
             .replaceFirst(/^refs\/heads\//, '').replaceFirst(/^origin\//, '')
           env.PUBLISH_IMAGES = (env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH && !env.CHANGE_ID).toString()
@@ -110,6 +114,16 @@ pipeline {
     stage('Detect changed images') {
       steps {
         script {
+          if (!env.CHECKOUT_PREVIOUS_SUCCESSFUL_COMMIT && params.JENKINS_READ_CREDENTIAL_ID?.trim()) {
+            withCredentials([usernamePassword(credentialsId: params.JENKINS_READ_CREDENTIAL_ID.trim(),
+              usernameVariable: 'JENKINS_API_USER', passwordVariable: 'JENKINS_API_TOKEN')]) {
+              sh 'python3.12 scripts/comparison_base.py --output artifacts/comparison-base.json'
+            }
+          } else {
+            sh 'python3.12 scripts/comparison_base.py --output artifacts/comparison-base.json'
+          }
+          def comparison = readJSON(file: 'artifacts/comparison-base.json', returnPojo: true)
+          env.GIT_PREVIOUS_SUCCESSFUL_COMMIT = comparison.base
           sh '''
             set -eu
             FORCE_OPTION=''
@@ -519,7 +533,7 @@ pipeline {
           }
           def event = currentBuild.currentResult == 'SUCCESS' ? 'Pipeline succeeded' : (currentBuild.currentResult == 'ABORTED' ? 'Pipeline aborted' : 'Pipeline failed')
           notifyDelivery(event)
-          archiveArtifacts artifacts: 'artifacts/image-selection.json,artifacts/candidate.json,artifacts/verification.json,artifacts/dev-recovery.json,artifacts/production-delivery.json,artifacts/source-approval.json,artifacts/pull-request.json', allowEmptyArchive: true, fingerprint: true
+          archiveArtifacts artifacts: 'artifacts/comparison-base.json,artifacts/image-selection.json,artifacts/candidate.json,artifacts/verification.json,artifacts/dev-recovery.json,artifacts/production-delivery.json,artifacts/source-approval.json,artifacts/pull-request.json', allowEmptyArchive: true, fingerprint: true
           sh 'rm -rf .ci-venv || true'
         }
       }
