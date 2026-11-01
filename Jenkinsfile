@@ -117,7 +117,9 @@ pipeline {
             python3.12 scripts/image_selection.py --base "${GIT_PREVIOUS_SUCCESSFUL_COMMIT:-}" \
               --output artifacts/image-selection.json $FORCE_OPTION
           '''
-          def selection = new groovy.json.JsonSlurperClassic().parseText(readFile('artifacts/image-selection.json'))
+          // Pipeline Utility Steps returns serializable Java Map/List values.
+          // Do not retain a Groovy parser receiver across readFile checkpoints.
+          def selection = readJSON(file: 'artifacts/image-selection.json', returnPojo: true)
           // Keep the complete test suite, including CI-only and documentation changes.
           env.APP_CHANGED = 'true'
           env.BUILD_IMAGES = selection.selected.join(' ')
