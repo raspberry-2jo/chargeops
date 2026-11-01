@@ -82,6 +82,7 @@ pipeline {
       steps {
         script {
           env.DEV_CHECK_STATE = 'not_started'
+          env.HAS_SELECTED_IMAGES = 'false'
           env.DEV_GITOPS_OVERLAY = params.DEV_DELIVERY_MODE == 'canary' ? 'chargeops-chatops/overlays/development-canary' :
             (params.DEV_DELIVERY_MODE == 'deployment' ? 'chargeops-chatops/overlays/development' : 'chargeops-chatops/overlays/development-rolling')
           def checkoutVars = checkout scm
@@ -137,10 +138,12 @@ pipeline {
           // Keep the complete test suite, including CI-only and documentation changes.
           env.APP_CHANGED = 'true'
           env.BUILD_IMAGES = selection.selected.join(' ')
+          env.HAS_SELECTED_IMAGES = (!selection.selected.isEmpty()).toString()
           env.RUN_CSMS_CANARY = (params.ENABLE_CANARY && selection.selected.contains('chargeops-csms')).toString()
           echo 'Selected images: ' + (env.BUILD_IMAGES ?: '(none)')
           if (selection.selected.isEmpty()) {
-            echo 'Ops promote skipped: no image changes; canary skipped: no image changes'
+            echo 'Image build/scan/push skipped: no image changes; Dev verifies current digests only'
+            echo 'Source PR, approval wait, Ops promote and canary skipped: no image changes'
           } else if (!selection.selected.contains('chargeops-csms')) {
             echo 'canary skipped: chargeops-csms unchanged'
           }
@@ -156,7 +159,7 @@ pipeline {
           .ci-venv/bin/python -m pip install --upgrade pip
           .ci-venv/bin/python -m pip install -r requirements-dev.txt
           RESET_OPTION=''
-          if [ -z "$BUILD_IMAGES" ]; then RESET_OPTION='--preserve-delivery'; fi
+          if [ -z "${BUILD_IMAGES:-}" ]; then RESET_OPTION='--preserve-delivery'; fi
           .ci-venv/bin/python scripts/env_cd.py reset $RESET_OPTION
           .ci-venv/bin/python -m pytest -q tests/
           python3.12 scripts/ci.py validate
@@ -177,7 +180,7 @@ pipeline {
       }
     }
     stage('Docker Build: changed images only') {
-      when { expression { env.BUILD_IMAGES?.trim() } }
+      when { expression { env.HAS_SELECTED_IMAGES == 'true' } }
       steps {
         sh '''
           set -eu
@@ -188,7 +191,7 @@ pipeline {
             fi
           fi
           # Reject removed or unknown names before running Docker.
-          for NAME in $BUILD_IMAGES; do
+          for NAME in ${BUILD_IMAGES:-}; do
             case "$NAME" in
               chargeops-ai-gateway|chargeops-chatops-bot|chargeops-csms|chargeops-notifier|chargeops-vcharger|chargeops-collector) ;;
               *) echo "Unknown image: $NAME" >&2; exit 1 ;;
@@ -227,7 +230,7 @@ pipeline {
             NAME="$1"
             DOCKERFILE="$2"
             CONTEXT="$3"
-            case " $BUILD_IMAGES " in
+            case " ${BUILD_IMAGES:-} " in
               *" $NAME "*)
                 echo "Starting image build: $NAME"
                 docker build --pull -f "$DOCKERFILE" \
@@ -249,13 +252,13 @@ pipeline {
       }
     }
     stage('Trivy Quality Gate') {
-      when { expression { env.BUILD_IMAGES?.trim() } }
+      when { expression { env.HAS_SELECTED_IMAGES == 'true' } }
       steps {
         timeout(time: 30, unit: 'MINUTES') {
           sh '''
             set -eu
             python3.12 scripts/trivy_gate.py run --build-number "$BUILD_NUMBER" \
-              --images "$BUILD_IMAGES" --registry "$REGISTRY" --tag "$IMAGE_TAG"
+              --images "${BUILD_IMAGES:-}" --registry "$REGISTRY" --tag "$IMAGE_TAG"
           '''
         }
       }
@@ -275,7 +278,7 @@ pipeline {
       }
     }
     stage('Registry Push: scanned images only') {
-      when { expression { env.PUBLISH_IMAGES == 'true' && env.BUILD_IMAGES?.trim() } }
+      when { expression { env.PUBLISH_IMAGES == 'true' && env.HAS_SELECTED_IMAGES == 'true' } }
       steps {
         sh '''
           set -eu
@@ -285,12 +288,12 @@ pipeline {
           fi
           # Also blocks Restart from Stage from bypassing a missing/failed/stale scan.
           python3.12 scripts/trivy_gate.py verify --build-number "$BUILD_NUMBER" \
-            --images "$BUILD_IMAGES" --registry "$REGISTRY" --tag "$IMAGE_TAG"
-          for NAME in $BUILD_IMAGES; do
+            --images "${BUILD_IMAGES:-}" --registry "$REGISTRY" --tag "$IMAGE_TAG"
+          for NAME in ${BUILD_IMAGES:-}; do
             docker push "$REGISTRY/$NAME:$IMAGE_TAG"
           done
           if [ "${PUBLISH_DEV_TAG:-false}" = 'true' ]; then
-            for NAME in $BUILD_IMAGES; do
+            for NAME in ${BUILD_IMAGES:-}; do
               docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$REGISTRY/$NAME:dev"
               docker push "$REGISTRY/$NAME:dev"
             done
@@ -299,13 +302,13 @@ pipeline {
       }
     }
     stage('ECR mirror push') {
-      when { expression { params.ECR_MIRROR && env.PUBLISH_IMAGES == 'true' && env.BUILD_IMAGES?.trim() } }
+      when { expression { params.ECR_MIRROR && env.PUBLISH_IMAGES == 'true' && env.HAS_SELECTED_IMAGES == 'true' } }
       steps {
         // Gate failure is fatal, even though an ECR mirror outage remains UNSTABLE.
         sh '''
           set -eu
           python3.12 scripts/trivy_gate.py verify --build-number "$BUILD_NUMBER" \
-            --images "$BUILD_IMAGES" --registry "$REGISTRY" --tag "$IMAGE_TAG"
+            --images "${BUILD_IMAGES:-}" --registry "$REGISTRY" --tag "$IMAGE_TAG"
         '''
         catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
           withCredentials([
@@ -319,7 +322,7 @@ pipeline {
               ECR_HOST="${ECR_REGISTRY%%/*}"
               trap 'docker logout "$ECR_HOST" >/dev/null 2>&1 || true' EXIT
               aws ecr get-login-password | docker login --username AWS --password-stdin "$ECR_HOST"
-              for NAME in $BUILD_IMAGES; do
+              for NAME in ${BUILD_IMAGES:-}; do
                 docker tag "$REGISTRY/$NAME:$IMAGE_TAG" "$ECR_REGISTRY/$NAME:$IMAGE_TAG"
                 docker push "$ECR_REGISTRY/$NAME:$IMAGE_TAG"
               done
@@ -368,7 +371,12 @@ pipeline {
               if [ "$RUN_OCPP_FIXTURE_TEST" = 'true' ]; then OCPP_OPTION='--ocpp-fixture-test'; fi
               CANARY_OPTION=''
               if [ "$RUN_CSMS_CANARY" = 'true' ]; then CANARY_OPTION='--canary'; fi
-              .ci-venv/bin/python scripts/env_cd.py prepare --tag "$IMAGE_TAG" --source "$(git rev-parse HEAD)" --images "$BUILD_IMAGES" $OCPP_OPTION $CANARY_OPTION
+              if [ -z "${BUILD_IMAGES:-}" ]; then
+                echo 'Dev verification-only: current digests; no GitOps commit'
+                .ci-venv/bin/python scripts/env_cd.py prepare --verify-current --tag "$IMAGE_TAG" --source "$(git rev-parse HEAD)" $OCPP_OPTION
+              else
+                .ci-venv/bin/python scripts/env_cd.py prepare --tag "$IMAGE_TAG" --source "$(git rev-parse HEAD)" --images "${BUILD_IMAGES:-}" $OCPP_OPTION $CANARY_OPTION
+              fi
               .ci-venv/bin/python scripts/env_cd.py verify
             '''
           }
@@ -384,7 +392,7 @@ pipeline {
       when {
         expression {
           params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' && env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH &&
-            env.SOURCE_COMMIT?.trim()
+            env.SOURCE_COMMIT?.trim() && env.HAS_SELECTED_IMAGES == 'true'
         }
       }
       steps {
@@ -394,15 +402,13 @@ pipeline {
           file(credentialsId: params.DEV_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG')
         ]) {
           script {
-            if (env.BUILD_IMAGES?.trim()) {
+            if (env.HAS_SELECTED_IMAGES == 'true') {
               // Existing-traffic policy needs no fixture; validate one only if
               // the optional active smoke metric has explicitly been installed.
               if (env.RUN_CSMS_CANARY == 'true') {
                 sh '.ci-venv/bin/python scripts/canary_cd.py check-fixture'
               }
               sh '.ci-venv/bin/python scripts/github_cd.py open-pr'
-            } else {
-              sh '.ci-venv/bin/python scripts/github_cd.py open-ci-pr --source "$SOURCE_COMMIT"'
             }
           }
         }
@@ -418,7 +424,7 @@ pipeline {
       when {
         expression {
           params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' && env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH &&
-            env.BUILD_IMAGES?.trim()
+            env.HAS_SELECTED_IMAGES == 'true'
         }
       }
       steps {
@@ -434,7 +440,7 @@ pipeline {
       when {
         expression {
           params.ENABLE_ENVIRONMENT_CD && env.PUBLISH_IMAGES == 'true' && env.CHECKOUT_BRANCH == env.PUBLISH_BRANCH &&
-            env.BUILD_IMAGES?.trim()
+            env.HAS_SELECTED_IMAGES == 'true'
         }
       }
       steps {
@@ -497,7 +503,7 @@ pipeline {
     always {
       script {
         try {
-            if (env.DEV_CHECK_STATE == 'pending' && ['chargeops-chatops/overlays/development-canary', 'chargeops-chatops/overlays/development-rolling'].contains(env.DEV_GITOPS_OVERLAY) && fileExists('.ci-venv/bin/python') && fileExists('artifacts/candidate.json')) {
+            if (env.HAS_SELECTED_IMAGES == 'true' && env.DEV_CHECK_STATE == 'pending' && ['chargeops-chatops/overlays/development-canary', 'chargeops-chatops/overlays/development-rolling'].contains(env.DEV_GITOPS_OVERLAY) && fileExists('.ci-venv/bin/python') && fileExists('artifacts/candidate.json')) {
               notifyDelivery('Dev verification failed; recovery started')
               withCredentials([
                 usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD'),

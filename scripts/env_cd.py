@@ -492,7 +492,12 @@ def detect_dev_overlay():
     return path
 
 
-def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False, build_images=None):
+def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False, build_images=None, verify_current=False):
+    if verify_current:
+        if canary or build_images and build_images.strip():
+            raise DeliveryPreflightError('Verification-only mode cannot select images or enable Canary')
+        build_images = ''
+        print('Dev verification-only mode: using current digests; GitOps image changes disabled', flush=True)
     validate_dev_overlay()
     if not re.fullmatch(r'build-(?:(?:kim_chanju|dev)-)?[0-9]+-[a-f0-9]{12}', tag):
         raise DeliveryPreflightError('Only a unique build tag may identify a candidate')
@@ -953,6 +958,7 @@ def main():
     parser.add_argument('--tag')
     parser.add_argument('--source')
     parser.add_argument('--images', help='Space-separated image names built and pushed by this Jenkins run')
+    parser.add_argument('--verify-current', action='store_true', help='Verify current Dev digests without changing images or creating a GitOps commit')
     parser.add_argument('--timeout', type=int, help='Convergence seconds (Dev Canary verify: 900; otherwise: 600)')
     parser.add_argument('--ocpp-fixture-test', action='store_true')
     parser.add_argument('--canary', action='store_true')
@@ -960,7 +966,7 @@ def main():
     parser.add_argument('--preserve-delivery', action='store_true', help='Keep prior delivery history for verification-only builds')
     args = parser.parse_args()
     if args.command == 'prepare':
-        prepare(args.repo, args.tag or '', args.source or '', args.candidate, args.ocpp_fixture_test, args.canary, args.images)
+        prepare(args.repo, args.tag or '', args.source or '', args.candidate, args.ocpp_fixture_test, args.canary, args.images, args.verify_current)
     elif args.command == 'verify':
         timeout = args.timeout if args.timeout is not None else (900 if DEV == CANARY_DEV else 600)
         verify(args.repo, args.candidate, args.receipt, timeout)

@@ -155,12 +155,31 @@ def test_pipeline_shell_only_passes_canary_for_selected_csms(tmp_path, selection
     log = tmp_path / 'commands.log'
     env = dict(os.environ, RUN_CSMS_CANARY=flag, ENABLE_CANARY='true', BUILD_IMAGES=selection,
                IMAGE_TAG='build-86-abcdef012345', RUN_OCPP_FIXTURE_TEST='false', CALL_LOG=log.as_posix())
+    if not selection:
+        env.pop('BUILD_IMAGES', None)  # Jenkins can omit an empty env value entirely.
     prefix = "kubectl() { :; }\ngit() { printf '%s' " + 'c' * 40 + "; }\n"
     result = subprocess.run([bash], input=prefix + script, cwd=tmp_path, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     commands = log.read_text().splitlines()
     assert ('--canary' in commands[0]) is (flag == 'true')
+    assert ('--verify-current' in commands[0]) is (not selection)
     assert commands[1] == 'scripts/env_cd.py verify'
+
+
+def test_verify_current_does_not_resolve_pin_or_commit_and_runs_integration(apps, tmp_path, monkeypatch):
+    before = cd.run('git', 'rev-parse', 'HEAD', cwd=apps)
+    images = cd.application_digest_snapshot(apps, cd.DEV)
+    for name in ('resolve_digest', 'pin_image', 'commit'):
+        monkeypatch.setattr(cd, name, lambda *a, **kw: pytest.fail('Verification-only must not mutate GitOps'))
+    path, receipt = tmp_path / 'candidate.json', tmp_path / 'receipt.json'
+    cd.prepare(apps, 'build-90-abcdef012345', 'c' * 40, path, verify_current=True)
+    value = cd.load(path)
+    assert value['built_images'] == [] and value['development_unchanged'] is True
+    assert value['development_images'] == images
+    run_existing_verification(apps, path, receipt, monkeypatch)
+    assert receipt.exists()
+    assert cd.run('git', 'rev-parse', 'HEAD', cwd=apps) == before
+    assert cd.application_digest_snapshot(apps, cd.DEV) == images
 
 
 def test_cronjob_digest_check_does_not_create_an_execution_job(monkeypatch):
