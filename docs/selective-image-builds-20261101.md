@@ -85,10 +85,10 @@ Digest 조합 고정 대상이며 Dev 런타임 통합 검사를 통과한 앱�
 기존 GitHub PR 설명도 이 제한을 명시하고 있으며 유지한다. 다른 5개 앱까지 Dev에
 배포해 런타임 검사하는 구성은 이번 범위에 포함하지 않는다.
 
-Dev의 CSMS anchor가 현재 Ops CSMS와 다르다면, non-CSMS-only 릴리스도 검증된
-Dev CSMS anchor를 함께 승격할 수 있다. CSMS를 새로 빌드하는 것은 아니다.
-이는 "선택된 새 이미지 + 고정된 기존 이미지" 조합을 일관되게 승격하는 기존
-Canary anchor 동작을 보존한 것이다.
+추가 Canary 범위 규칙에 따라 non-CSMS-only 릴리스는 Ops CSMS를 현재 Digest로
+유지한다. Dev CSMS anchor는 통합 검사에만 사용하고 Ops 승격 이미지에서 제외한다.
+CSMS가 선택된 경우에만 CSMS Digest 승격과 Canary를 수행한다.
+자세한 현재 규칙은 [Canary 적용 범위](canary-scope-20261101.md)를 따른다.
 
 ## 유지한 정책과 검증
 

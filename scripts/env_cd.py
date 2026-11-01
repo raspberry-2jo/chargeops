@@ -255,13 +255,45 @@ def workload_containers(document):
 
 def candidate_images(candidate):
     images = candidate.get('images', {IMAGE: candidate['image']})
-    if not isinstance(images, dict) or images.get(IMAGE) != candidate['image']:
+    built = declared_built_images(candidate)
+    csms_required = built is None or 'chargeops-csms' in built
+    if (not isinstance(images, dict) or csms_required and images.get(IMAGE) != candidate['image']
+            or IMAGE in images and images[IMAGE] != candidate['image']):
         raise DeliveryPreflightError('Release images must include the verified CSMS digest')
     for repository, reference in images.items():
         if repository not in IMAGE_ALIASES or not isinstance(reference, str) or not re.fullmatch(
                 re.escape(repository) + r'@sha256:[a-f0-9]{64}', reference):
             raise DeliveryPreflightError('Release contains an unknown or unpinned application image')
     return images
+
+
+def declared_built_images(candidate):
+    if 'built_images' not in candidate:
+        return None
+    names = candidate['built_images']
+    allowed = {repo.rsplit('/', 1)[-1] for repo in APP_IMAGES.values()}
+    if (not isinstance(names, list) or any(not isinstance(name, str) for name in names)
+            or len(set(names)) != len(names) or set(names) - allowed):
+        raise DeliveryPreflightError('Built image list is malformed')
+    return names
+
+
+def selected_candidate_images(candidate):
+    images = candidate_images(candidate)
+    if 'built_images' not in candidate:
+        return images  # Existing CSMS-only candidate/receipt compatibility.
+    names = candidate['built_images']
+    if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+        raise DeliveryPreflightError('Built image list is malformed')
+    selected = {repo: image for repo, image in images.items() if repo.rsplit('/', 1)[-1] in names}
+    if set(names) != {repo.rsplit('/', 1)[-1] for repo in selected}:
+        raise DeliveryPreflightError('Built images do not match the pinned application selection')
+    return selected
+
+
+def csms_canary_scope(candidate):
+    names = declared_built_images(candidate)
+    return names is None or 'chargeops-csms' in names
 
 
 def application_digest_snapshot(repo, overlay):
@@ -420,6 +452,9 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False, bu
         raise DeliveryPreflightError('Unknown image selected for application delivery')
     previous_dev = csms_image(repo, DEV)
     csms_selected = selected is None or 'chargeops-csms' in selected
+    if not csms_selected:
+        canary = False
+        print('canary skipped: ' + ('chargeops-csms unchanged' if selected else 'no image changes'), flush=True)
     candidate_image = resolve_digest(IMAGE + ':' + tag) if csms_selected else previous_dev
     if not re.fullmatch(re.escape(IMAGE) + r'@sha256:[a-f0-9]{64}', candidate_image):
         raise DeliveryPreflightError('Current Dev CSMS must be digest-pinned when not rebuilt')
@@ -428,7 +463,7 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False, bu
                  'production_fingerprint': before, 'previous_production_image': prod_image,
                  'development_overlay': DEV}
     if build_images is not None:
-        images = {IMAGE: candidate['image']}
+        images = {IMAGE: candidate['image']} if csms_selected else {}
         for name in sorted(selected - {'chargeops-csms'}):
             repository = allowed[name]
             images[repository] = resolve_digest(repository + ':' + tag)
@@ -763,7 +798,11 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
     candidate, receipt = load(candidate_path), load(receipt_path)
     validate_receipt(candidate, receipt, int(time.time()))
     if candidate.get('built_images') == []:
-        raise DeliveryPreflightError('No image changes to promote; current Dev was verification-only')
+        print('Ops promote skipped: no image changes; canary skipped: no image changes', flush=True)
+        return
+    if not csms_canary_scope(candidate):
+        canary = False
+        print('canary skipped: chargeops-csms unchanged', flush=True)
     approval = None
     if require_approved_pr:
         branch = os.environ.get('CHECKOUT_BRANCH')
@@ -790,8 +829,10 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
         raise DeliveryPreflightError('Successful verification job is missing or replaced')
     delivery = {'schema': 1, 'candidate': fingerprint(candidate), 'image': candidate['image'],
                 'previous_image': candidate['previous_production_image'], 'phase': 'prepared', 'canary': canary}
+    if 'built_images' in candidate:
+        delivery['built_images'] = candidate['built_images']
     if 'images' in candidate:
-        delivery['images'] = candidate_images(candidate)
+        delivery['images'] = selected_candidate_images(candidate)
     if 'release_images' in candidate:
         delivery['release_images'] = candidate['release_images']
     if approval:
@@ -801,8 +842,8 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
     if canary:
         stamp_gate_baseline(repo, PROD)
     if 'images' in candidate:
-        pin_application_images(repo, candidate_images(candidate))
-        delivery['workloads'] = application_workloads(repo, candidate_images(candidate), CANARY if canary else PROD)
+        pin_application_images(repo, selected_candidate_images(candidate))
+        delivery['workloads'] = application_workloads(repo, selected_candidate_images(candidate), CANARY if canary else PROD)
     else:
         pin_image(repo, PROD, candidate['image'])
     if 'release_images' in candidate and application_digest_snapshot(repo, PROD) != candidate['release_images']:
@@ -815,10 +856,10 @@ def promote(repo, candidate_path, receipt_path, delivery_path='artifacts/product
     if canary:
         delivery['canary_fingerprint'] = fingerprint(rendered(repo, CANARY))
     save(delivery_path, delivery)
-    print(f'Approved digest committed at {revision}; ' + ('Canary Sync is ready' if canary else 'manual Argo CD ops Sync is required'))
+    print(f'Approved digest committed at {revision}; ' + ('Canary Sync is ready' if canary else 'regular Ops Sync is ready; Canary is not authorized'))
 
 
-def reset_artifacts():
+def reset_artifacts(preserve_delivery=False):
     path = Path('artifacts/production-delivery.json')
     if path.exists():
         delivery = load(path)
@@ -828,6 +869,8 @@ def reset_artifacts():
     if recovery.is_file() and load(recovery).get('phase') != 'recovered':
         raise DeliveryPreflightError('Unfinished Dev recovery exists; run recover-dev before starting a new build')
     for name in ['candidate.json', 'verification.json', 'production-delivery.json', 'pull-request.json', 'source-approval.json', 'dev-recovery.json']:
+        if preserve_delivery and name == 'production-delivery.json':
+            continue
         (Path('artifacts') / name).unlink(missing_ok=True)
 
 
@@ -846,6 +889,7 @@ def main():
     parser.add_argument('--ocpp-fixture-test', action='store_true')
     parser.add_argument('--canary', action='store_true')
     parser.add_argument('--require-approved-pr', action='store_true')
+    parser.add_argument('--preserve-delivery', action='store_true', help='Keep prior delivery history for verification-only builds')
     args = parser.parse_args()
     if args.command == 'prepare':
         prepare(args.repo, args.tag or '', args.source or '', args.candidate, args.ocpp_fixture_test, args.canary, args.images)
@@ -855,7 +899,7 @@ def main():
     elif args.command == 'promote':
         promote(args.repo, args.candidate, args.receipt, args.delivery, args.canary, args.require_approved_pr)
     elif args.command == 'reset':
-        reset_artifacts()
+        reset_artifacts(args.preserve_delivery)
     elif args.command == 'recover-dev':
         recover_dev(args.repo, args.candidate, args.dev_recovery, args.timeout if args.timeout is not None else 600)
     elif args.command == 'dev-overlay':

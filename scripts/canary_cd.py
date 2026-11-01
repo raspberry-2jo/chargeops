@@ -141,6 +141,9 @@ def recover(repo, delivery_path, timeout=600):
     if not path.exists():
         return
     delivery = cd.load(path)
+    if not cd.csms_canary_scope(delivery):
+        print('canary recovery skipped: chargeops-csms unchanged', flush=True)
+        return
     if not delivery.get('canary'):
         return  # Manual-only promotions never authorize automatic recovery.
     if delivery.get('phase') in ['succeeded', 'recovered']:
@@ -275,6 +278,9 @@ def image_is_current_rs(rollout, image):
 
 def deliver(repo, delivery_path, timeout):
     delivery = cd.load(delivery_path)
+    if not cd.csms_canary_scope(delivery):
+        print('canary skipped: ' + ('no image changes' if delivery.get('built_images') == [] else 'chargeops-csms unchanged'), flush=True)
+        return
     if delivery.get('phase') != 'pending':
         raise cd.DeliveryPreflightError('An approved pending production promotion is required')
     if not delivery.get('canary'):

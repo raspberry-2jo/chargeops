@@ -55,8 +55,9 @@ def test_no_build_still_runs_existing_job_but_never_promotes(apps, tmp_path, mon
     cd.prepare(apps, 'build-84-abcdef012345', 'c' * 40, path, canary=True, build_images='')
     before = cd.production_fingerprint(apps)
     run_existing_verification(apps, path, receipt, monkeypatch)
-    with pytest.raises(cd.DeliveryPreflightError, match='No image changes'):
-        cd.promote(apps, path, receipt, tmp_path / 'delivery.json', canary=True)
+    delivery = tmp_path / 'delivery.json'
+    cd.promote(apps, path, receipt, delivery, canary=True)
+    assert not delivery.exists()
     assert cd.production_fingerprint(apps) == before
 
 

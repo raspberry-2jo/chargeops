@@ -119,7 +119,13 @@ pipeline {
           // Keep the complete test suite, including CI-only and documentation changes.
           env.APP_CHANGED = 'true'
           env.BUILD_IMAGES = selection.selected.join(' ')
+          env.RUN_CSMS_CANARY = (params.ENABLE_CANARY && selection.selected.contains('chargeops-csms')).toString()
           echo 'Selected images: ' + (env.BUILD_IMAGES ?: '(none)')
+          if (selection.selected.isEmpty()) {
+            echo 'Ops promote skipped: no image changes; canary skipped: no image changes'
+          } else if (!selection.selected.contains('chargeops-csms')) {
+            echo 'canary skipped: chargeops-csms unchanged'
+          }
         }
       }
     }
@@ -131,7 +137,9 @@ pipeline {
           python3.12 -m venv .ci-venv
           .ci-venv/bin/python -m pip install --upgrade pip
           .ci-venv/bin/python -m pip install -r requirements-dev.txt
-          .ci-venv/bin/python scripts/env_cd.py reset
+          RESET_OPTION=''
+          if [ -z "$BUILD_IMAGES" ]; then RESET_OPTION='--preserve-delivery'; fi
+          .ci-venv/bin/python scripts/env_cd.py reset $RESET_OPTION
           .ci-venv/bin/python -m pytest -q tests/
           python3.12 scripts/ci.py validate
         '''
@@ -307,7 +315,7 @@ pipeline {
               OCPP_OPTION=''
               if [ "$RUN_OCPP_FIXTURE_TEST" = 'true' ]; then OCPP_OPTION='--ocpp-fixture-test'; fi
               CANARY_OPTION=''
-              if [ "$ENABLE_CANARY" = 'true' ]; then CANARY_OPTION='--canary'; fi
+              if [ "$RUN_CSMS_CANARY" = 'true' ]; then CANARY_OPTION='--canary'; fi
               .ci-venv/bin/python scripts/env_cd.py prepare --tag "$IMAGE_TAG" --source "$(git rev-parse HEAD)" --images "$BUILD_IMAGES" $OCPP_OPTION $CANARY_OPTION
               .ci-venv/bin/python scripts/env_cd.py verify
             '''
@@ -337,7 +345,9 @@ pipeline {
             if (env.BUILD_IMAGES?.trim()) {
               // Existing-traffic policy needs no fixture; validate one only if
               // the optional active smoke metric has explicitly been installed.
-              sh '.ci-venv/bin/python scripts/canary_cd.py check-fixture'
+              if (env.RUN_CSMS_CANARY == 'true') {
+                sh '.ci-venv/bin/python scripts/canary_cd.py check-fixture'
+              }
               sh '.ci-venv/bin/python scripts/github_cd.py open-pr'
             } else {
               sh '.ci-venv/bin/python scripts/github_cd.py open-ci-pr --source "$SOURCE_COMMIT"'
@@ -377,11 +387,18 @@ pipeline {
       }
       steps {
         script {
-          if (!params.ENABLE_CANARY) { error('PR-based Ops delivery requires ENABLE_CANARY=true') }
-          if (params.ENABLE_CANARY) {
+          if ((env.BUILD_IMAGES ?: '').tokenize().contains('chargeops-csms') && !params.ENABLE_CANARY) {
+            error('CSMS Ops delivery requires ENABLE_CANARY=true')
+          }
+          if (env.RUN_CSMS_CANARY == 'true') {
             withCredentials([file(credentialsId: params.CANARY_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG'),
               usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
               sh '.ci-venv/bin/python scripts/canary_cd.py preflight'
+            }
+          } else {
+            withCredentials([file(credentialsId: params.CANARY_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG'),
+              usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+              sh '.ci-venv/bin/python scripts/ops_delivery.py preflight'
             }
           }
         }
@@ -394,18 +411,28 @@ pipeline {
           sh '''
             set -eu
             CANARY_OPTION=''
-            if [ "$ENABLE_CANARY" = 'true' ]; then CANARY_OPTION='--canary'; fi
+            if [ "$RUN_CSMS_CANARY" = 'true' ]; then CANARY_OPTION='--canary'; fi
             .ci-venv/bin/python scripts/env_cd.py promote --require-approved-pr $CANARY_OPTION
           '''
         }
         script {
-          if (params.ENABLE_CANARY) {
+          if (env.RUN_CSMS_CANARY == 'true') {
             stage('Ops Canary and automatic recovery') {
               notifyDelivery('Ops Canary started')
               withCredentials([file(credentialsId: params.CANARY_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG'),
                 usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
                 timeout(time: 30, unit: 'MINUTES') {
                   sh '.ci-venv/bin/python scripts/canary_cd.py run'
+                }
+              }
+            }
+          } else {
+            echo 'canary skipped: chargeops-csms unchanged'
+            stage('Ops regular deployment verification') {
+              withCredentials([file(credentialsId: params.CANARY_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG'),
+                usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+                timeout(time: 30, unit: 'MINUTES') {
+                  sh '.ci-venv/bin/python scripts/ops_delivery.py run'
                 }
               }
             }
@@ -433,7 +460,7 @@ pipeline {
           if (env.DEV_CHECK_STATE == 'pending' && fileExists('.ci-venv/bin/python')) {
             try { githubStatus('failure') } catch (Exception ignored) { echo 'Unable to publish failed Dev status; inspect GitHub permissions.' }
           }
-          if (params.ENABLE_CANARY && env.CHECKOUT_BRANCH == env.PRODUCTION_BRANCH && fileExists('.ci-venv/bin/python') && fileExists('artifacts/production-delivery.json')) {
+          if (env.RUN_CSMS_CANARY == 'true' && env.CHECKOUT_BRANCH == env.PRODUCTION_BRANCH && fileExists('.ci-venv/bin/python') && fileExists('artifacts/production-delivery.json')) {
             withCredentials([file(credentialsId: params.CANARY_KUBECONFIG_CREDENTIAL_ID.trim(), variable: 'KUBECONFIG'),
               usernamePassword(credentialsId: params.GITOPS_CREDENTIAL_ID.trim(), usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
               timeout(time: 15, unit: 'MINUTES') {
