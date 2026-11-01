@@ -5,6 +5,8 @@ No kubectl writes to ops here. Optional Canary Sync is handled by canary_cd.py.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -56,6 +58,61 @@ def poll_seconds():
 
 def iso_time(value=None):
     return datetime.fromtimestamp(time.time() if value is None else value, timezone.utc).isoformat(timespec='milliseconds')
+
+
+_active_poll = ContextVar('chargeops_active_poll', default=None)
+
+
+class PollDiagnostics:
+    """Measure polling, never decide delivery state or alter sleep/deadlines."""
+    def __init__(self, scope, interval, entry):
+        self.scope, self.interval = scope, interval
+        self.trace = os.environ.get('CD_POLL_DIAGNOSTICS', '').lower() == 'true'
+        self.count, self.window_count = 0, 0
+        self.previous_start, self.max_gap = None, None
+        self.max_check, self.next_log = 0.0, 0.0
+        def code_id(path):
+            try:
+                return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]
+            except OSError:
+                return 'unavailable'
+        source = 'environment' if 'CD_POLL_SECONDS' in os.environ else 'default'
+        print(f'CD poll config: at={iso_time()} scope={scope} sleep_seconds={interval:.3f}'
+              f' source={source} diagnostics={str(self.trace).lower()} log_heartbeat_seconds=30'
+              f' entry_sha256={code_id(entry)} observer_sha256={code_id(__file__)}', flush=True)
+
+    @contextmanager
+    def sample(self, started):
+        self.count += 1
+        gap = None if self.previous_start is None else max(0, started-self.previous_start)
+        self.previous_start = started
+        record = {'api_calls': 0, 'api_seconds': 0.0, 'terminal': False}
+        token = _active_poll.set(record)
+        failed = True
+        if self.trace:
+            print(f'CD poll begin: at={iso_time()} scope={self.scope} poll={self.count}', flush=True)
+        try:
+            yield record
+            failed = False
+        finally:
+            _active_poll.reset(token)
+            ended = time.monotonic()
+            check = max(0, ended-started)
+            self.window_count += 1
+            self.max_check = max(self.max_check, check)
+            if gap is not None:
+                self.max_gap = gap if self.max_gap is None else max(self.max_gap, gap)
+            if self.trace or self.count == 1 or ended >= self.next_log or failed or record['terminal']:
+                formatted_gap = 'NA' if gap is None else f'{gap:.3f}'
+                max_gap = 'NA' if self.max_gap is None else f'{self.max_gap:.3f}'
+                print(f'CD poll sample: at={iso_time()} scope={self.scope} poll={self.count}'
+                      f' window_polls={self.window_count} sleep_seconds={self.interval:.3f}'
+                      f' check_seconds={check:.3f} start_gap_seconds={formatted_gap}'
+                      f' api_calls={record["api_calls"]} api_seconds={record["api_seconds"]:.3f}'
+                      f' window_max_check_seconds={self.max_check:.3f} window_max_start_gap_seconds={max_gap}'
+                      f' terminal={str(record["terminal"]).lower()} error={str(failed).lower()}', flush=True)
+                self.next_log = ended + 30
+                self.window_count, self.max_check, self.max_gap = 0, 0.0, None
 
 
 class DevVerificationTiming:
@@ -512,7 +569,15 @@ def prepare(repo, tag, source, output, ocpp_fixture_test=False, canary=False, bu
 
 
 def kubectl(*args):
-    return json.loads(run('kubectl', *args, '-o', 'json'))
+    sample = _active_poll.get()
+    if sample is None:
+        return json.loads(run('kubectl', *args, '-o', 'json'))
+    started = time.monotonic()
+    try:
+        return json.loads(run('kubectl', *args, '-o', 'json'))
+    finally:
+        sample['api_calls'] += 1
+        sample['api_seconds'] += max(0, time.monotonic()-started)
 
 
 def live_candidate(image):
@@ -684,26 +749,29 @@ def _verify(repo, candidate_path, receipt_path, timeout, timing):
     deadline = started + timeout
     next_progress = started
     last_progress = None
-    while time.monotonic() < deadline:
-        if dev_rollout_failed(candidate['image']):
-            raise DeliveryPreflightError('Dev RollingUpdate failed; Dev recovery is required' if DEV == ROLLING_DEV else
-                                         'Dev Canary analysis aborted the candidate; Dev recovery is required')
-        try:
-            progress = dev_progress()
-        except (DeliveryPreflightError, RuntimeError):
-            # A diagnostic read must not introduce a new delivery verdict.
-            progress = {'sync': 'Unknown', 'health': 'Unknown'}
-            if DEV == CANARY_DEV:
-                progress.update(rollout='Unknown', step=0, steps=0, ready=0, desired=0,
-                                analysis='none', analysis_phase='none')
-        ready = live_candidate(candidate['image'])
-        timing.observe(progress, candidate_ready=ready)
-        if ready:
-            break
-        if progress != last_progress or time.monotonic() >= next_progress:
-            log_dev_progress(started, timeout, progress)
-            last_progress = progress
-            next_progress = time.monotonic() + 30
+    diagnostics = PollDiagnostics("dev_verify", interval, __file__)
+    while (now := time.monotonic()) < deadline:
+        with diagnostics.sample(now) as poll:
+            if dev_rollout_failed(candidate['image']):
+                raise DeliveryPreflightError('Dev RollingUpdate failed; Dev recovery is required' if DEV == ROLLING_DEV else
+                                             'Dev Canary analysis aborted the candidate; Dev recovery is required')
+            try:
+                progress = dev_progress()
+            except (DeliveryPreflightError, RuntimeError):
+                # A diagnostic read must not introduce a new delivery verdict.
+                progress = {'sync': 'Unknown', 'health': 'Unknown'}
+                if DEV == CANARY_DEV:
+                    progress.update(rollout='Unknown', step=0, steps=0, ready=0, desired=0,
+                                    analysis='none', analysis_phase='none')
+            ready = live_candidate(candidate['image'])
+            timing.observe(progress, candidate_ready=ready)
+            if ready:
+                poll["terminal"] = True
+                break
+            if progress != last_progress or time.monotonic() >= next_progress:
+                log_dev_progress(started, timeout, progress)
+                last_progress = progress
+                next_progress = time.monotonic() + 30
         time.sleep(interval)
     else:
         log_dev_progress(started, timeout)

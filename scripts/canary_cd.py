@@ -231,38 +231,41 @@ def wait(image, revision, timeout, marker, workloads=None):
     last_phase = None
     last_checks = None
     next_progress = 0
+    diagnostics = cd.PollDiagnostics("ops_canary", interval, __file__)
     while (now := time.monotonic()) < deadline:
-        app = check_application()
-        operation = app.get('status', {}).get('operationState', {})
-        own = owns_operation(operation, revision, marker)
-        if own and operation.get('phase') in ['Failed', 'Error']:
-            raise cd.DeliveryPreflightError('Argo CD approved application Sync failed')
-        rollout, healthy = rollout_state(image)
-        phase = rollout.get('status', {}).get('phase', 'Pending')
-        if phase != last_phase:
-            print('CSMS Rollout phase: ' + phase, flush=True)
-            last_phase = phase
-        deployment, actual = deployment_image()
-        apps_ready = own and operation.get('phase') == 'Succeeded' and regular_workloads_ready(workloads or [], operation)
-        checks = (own, operation.get('phase') == 'Succeeded', healthy, actual == image, apps_ready)
-        status = app.get('status', {})
-        progress = (checks, status.get('sync', {}).get('status', 'Unknown'),
-                    status.get('health', {}).get('status', 'Unknown'))
-        if progress != last_checks or now >= next_progress:
-            print('Canary completion checks: own_sync=' + str(checks[0])
-                  + ', sync_succeeded=' + str(checks[1]) + ', rollout_ready=' + str(checks[2])
-                  + ', deployment_image_matches=' + str(checks[3])
-                  + ', application_workloads_ready=' + str(checks[4])
-                  + ', sync=' + progress[1] + ', health=' + progress[2], flush=True)
-            last_checks = progress
-            next_progress = now + 30
-        if actual == image and (rollout.get('status', {}).get('abort') or phase == 'Degraded'):
-            # During recovery the old aborted generation may still be observed.
-            # Wait until the new workload template is reflected in current RS.
-            if image_is_current_rs(rollout, image):
-                raise cd.DeliveryPreflightError('Canary analysis or progress deadline aborted the update')
-        if own and operation.get('phase') == 'Succeeded' and healthy and apps_ready:
-            return
+        with diagnostics.sample(now) as poll:
+            app = check_application()
+            operation = app.get('status', {}).get('operationState', {})
+            own = owns_operation(operation, revision, marker)
+            if own and operation.get('phase') in ['Failed', 'Error']:
+                raise cd.DeliveryPreflightError('Argo CD approved application Sync failed')
+            rollout, healthy = rollout_state(image)
+            phase = rollout.get('status', {}).get('phase', 'Pending')
+            if phase != last_phase:
+                print('CSMS Rollout phase: ' + phase, flush=True)
+                last_phase = phase
+            deployment, actual = deployment_image()
+            apps_ready = own and operation.get('phase') == 'Succeeded' and regular_workloads_ready(workloads or [], operation)
+            checks = (own, operation.get('phase') == 'Succeeded', healthy, actual == image, apps_ready)
+            status = app.get('status', {})
+            progress = (checks, status.get('sync', {}).get('status', 'Unknown'),
+                        status.get('health', {}).get('status', 'Unknown'))
+            if progress != last_checks or now >= next_progress:
+                print('Canary completion checks: own_sync=' + str(checks[0])
+                      + ', sync_succeeded=' + str(checks[1]) + ', rollout_ready=' + str(checks[2])
+                      + ', deployment_image_matches=' + str(checks[3])
+                      + ', application_workloads_ready=' + str(checks[4])
+                      + ', sync=' + progress[1] + ', health=' + progress[2], flush=True)
+                last_checks = progress
+                next_progress = now + 30
+            if actual == image and (rollout.get('status', {}).get('abort') or phase == 'Degraded'):
+                # During recovery the old aborted generation may still be observed.
+                # Wait until the new workload template is reflected in current RS.
+                if image_is_current_rs(rollout, image):
+                    raise cd.DeliveryPreflightError('Canary analysis or progress deadline aborted the update')
+            if own and operation.get('phase') == 'Succeeded' and healthy and apps_ready:
+                poll["terminal"] = True
+                return
         time.sleep(interval)
     raise cd.DeliveryPreflightError('Canary completion deadline exceeded; inspect the last completion checks and recovery receipt')
 

@@ -81,20 +81,23 @@ def wait(revision, marker, workloads, timeout):
     deadline = time.monotonic() + timeout
     last = None
     next_log = 0
+    diagnostics = cd.PollDiagnostics("ops_regular", interval, __file__)
     while (now := time.monotonic()) < deadline:
-        state = application().get('status', {}).get('operationState', {})
-        own = canary.owns_operation(state, revision, marker)
-        phase = state.get('phase', 'Pending')
-        if own and phase in ('Failed', 'Error'):
-            raise cd.DeliveryPreflightError('Regular Ops application Sync failed')
-        complete = own and phase == 'Succeeded' and ready(workloads, state)
-        current = (own, phase, complete)
-        if current != last or now >= next_log:
-            print('Regular Ops completion: own_sync=' + str(own) + ', phase=' + phase
-                  + ', regular_workloads_and_digests_ready=' + str(complete), flush=True)
-            last = current; next_log = now + 30
-        if complete:
-            return
+        with diagnostics.sample(now) as poll:
+            state = application().get('status', {}).get('operationState', {})
+            own = canary.owns_operation(state, revision, marker)
+            phase = state.get('phase', 'Pending')
+            if own and phase in ('Failed', 'Error'):
+                raise cd.DeliveryPreflightError('Regular Ops application Sync failed')
+            complete = own and phase == 'Succeeded' and ready(workloads, state)
+            current = (own, phase, complete)
+            if current != last or now >= next_log:
+                print('Regular Ops completion: own_sync=' + str(own) + ', phase=' + phase
+                      + ', regular_workloads_and_digests_ready=' + str(complete), flush=True)
+                last = current; next_log = now + 30
+            if complete:
+                poll["terminal"] = True
+                return
         time.sleep(interval)
     raise cd.DeliveryPreflightError('Regular Ops rollout/digest verification deadline exceeded')
 

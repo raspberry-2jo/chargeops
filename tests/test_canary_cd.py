@@ -247,7 +247,7 @@ def test_old_success_for_same_revision_cannot_complete_a_new_operation(monkeypat
     monkeypatch.setattr(canary, 'rollout_state', lambda image: ({'status': {'phase': 'Healthy'}}, True))
     monkeypatch.setattr(canary, 'deployment_image', lambda: ({}, B))
     ticks = iter([0, 0, 3])
-    monkeypatch.setattr(canary.time, 'monotonic', lambda: next(ticks))
+    monkeypatch.setattr(canary.time, 'monotonic', lambda: next(ticks, 3))
     monkeypatch.setattr(canary.time, 'sleep', lambda *a: None)
     with pytest.raises(ValueError, match='deadline'):
         canary.wait(B, 'c' * 40, 2, 'new-marker')
@@ -266,7 +266,7 @@ def test_sync_identity_uses_explicit_operation_info_with_rewritten_username(monk
     monkeypatch.setattr(canary, 'rollout_state', lambda image: ({'status': {'phase': 'Healthy'}}, True))
     monkeypatch.setattr(canary, 'deployment_image', lambda: ({}, B))
     ticks = iter([0, 0, 3])
-    monkeypatch.setattr(canary.time, 'monotonic', lambda: next(ticks))
+    monkeypatch.setattr(canary.time, 'monotonic', lambda: next(ticks, 3))
     monkeypatch.setattr(canary.time, 'sleep', lambda *a: None)
     if case == 'same':
         canary.wait(B, 'c' * 40, 2, 'new-marker')
