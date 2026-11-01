@@ -370,4 +370,3 @@ def daily_report():
 def healthz():
     q("SELECT 1")
     return {"ok": True, "slack_fail": state["slack_fail"], "watchdog_age": int(time.time() - state["last_watchdog"])}
-# exp4-2
