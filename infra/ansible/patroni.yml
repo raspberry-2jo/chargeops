@@ -130,17 +130,26 @@
         mode: "0644"
         content: 'KERNEL=="watchdog", OWNER="postgres", GROUP="postgres", MODE="0600"'
 
+    - name: softdog 을 번호와 상관없이 /dev/watchdog-patroni 로 (iTCO 가 0번을 차지해도 Patroni 는 늘 softdog 을 연다, 2026-10-28)
+      ansible.builtin.copy:
+        dest: /etc/udev/rules.d/62-watchdog-patroni.rules
+        mode: "0644"
+        content: 'SUBSYSTEM=="watchdog", ATTR{identity}=="Software Watchdog", SYMLINK+="watchdog-patroni", OWNER="postgres", GROUP="postgres", MODE="0600"'
+
     - name: 지금 올리기 + 권한 (재부팅 전에도 바로 쓰게)
       ansible.builtin.shell: |
         modprobe softdog
         udevadm control --reload-rules
+        udevadm trigger --subsystem-match=watchdog --action=add
+        udevadm settle
         chown postgres:postgres /dev/watchdog && chmod 0600 /dev/watchdog
-        stat -c '%U %a' /dev/watchdog
+        d=$(readlink -f /dev/watchdog-patroni)
+        echo "$(stat -L -c '%U %a' /dev/watchdog-patroni)|$(cat /sys/class/watchdog/$(basename "$d")/identity)"
       register: wd
       changed_when: false
 
-    - name: 확인 (postgres 600 이어야 함)
-      ansible.builtin.assert: { that: ["wd.stdout == 'postgres 600'"], fail_msg: "/dev/watchdog: {{ wd.stdout }}", quiet: true }
+    - name: 확인 (링크가 softdog 을 가리키고 postgres 600 이어야 함)
+      ansible.builtin.assert: { that: ["wd.stdout == 'postgres 600|Software Watchdog'"], fail_msg: "/dev/watchdog-patroni: {{ wd.stdout }}", quiet: true }
 
 - name: 3. Patroni — 설치 · 설정만 (시작은 convert.sh 가 사람의 확인을 받으며)
   hosts: db

@@ -15,7 +15,7 @@ on "$ANY" "$PCTL list" 2>&1 | grep -v '^$'
 echo "== ② 서버별 (patroni · pgbouncer · watchdog 을 연 프로세스)"
 for h in db-01 db-02; do
   printf '   %s: ' "$h"
-  on "$h" 'echo "patroni=$(systemctl is-active patroni) pgbouncer=$(systemctl is-active pgbouncer) postgresql-17=$(systemctl is-enabled postgresql-17 2>/dev/null) watchdog=$(sudo find /proc/[0-9]*/fd -lname /dev/watchdog 2>/dev/null | wc -l)개"' 2>/dev/null || echo "접속 안 됨 (꺼졌거나 재부팅 중)"
+  on "$h" 'echo "patroni=$(systemctl is-active patroni) pgbouncer=$(systemctl is-active pgbouncer) postgresql-17=$(systemctl is-enabled postgresql-17 2>/dev/null) watchdog=$(sudo find /proc/[0-9]*/fd -lname "/dev/watchdog*" 2>/dev/null | wc -l)개"' 2>/dev/null || echo "접속 안 됨 (꺼졌거나 재부팅 중)"
 done
 echo "   (watchdog 1개 = Leader 가 잡고 있음. Replica 는 0 이 정상. postgresql-17 은 masked 가 정상)"
 

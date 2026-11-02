@@ -75,9 +75,12 @@ postgresql:
 
 # Patroni 가 멈추면(죽음 · 멈춤) watchdog 이 ttl - safety_margin 초 뒤 서버를 재부팅 → 옛 Primary 가 쓰기를 계속 받지 못함
 #   required = watchdog 을 못 열면 Leader 가 되는 것 자체를 거부 (2026-10-16 시험: 없을 때 Primary 두 대 · 279건 손실)
+#   device 는 번호(/dev/watchdog, watchdog0, watchdog1)가 아니라 softdog 을 이름으로 찾는 고정 링크를 쓴다.
+#   VirtualBox VM 은 iTCO_wdt 와 softdog 이 함께 올라오고, 어느 쪽이 0번이 될지는 부팅마다 보장되지 않는다
+#   (2026-10-28 운영 7분 쓰기 정지: /dev/watchdog 이 iTCO 를 가리켜 Patroni 가 열지 못함). 링크는 patroni.yml 2단계의 udev 규칙이 만든다
 watchdog:
   mode: required
-  device: /dev/watchdog
+  device: /dev/watchdog-patroni
   safety_margin: {{ ha.watchdog_safety_margin }}
 
 tags:
