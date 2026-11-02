@@ -45,7 +45,7 @@ done
 [ -n "$PRIMARY" ] && [ -n "$STANDBY" ] || die "Primary 1 · Standby 1 이 아님 (Primary='$PRIMARY' Standby='$STANDBY')"
 echo "   Primary = $PRIMARY · Standby = $STANDBY"
 for h in "$PRIMARY" "$STANDBY"; do
-  st=$(on "$h" 'echo "$(systemctl is-active postgresql-17)|$(systemctl is-active patroni)|$(sudo test -f /etc/patroni/patroni.yml && echo yes)|$(stat -c %U /dev/watchdog 2>/dev/null)|$(rpm -q --quiet patroni-etcd && echo yes)"')
+  st=$(on "$h" 'echo "$(systemctl is-active postgresql-17)|$(systemctl is-active patroni)|$(sudo test -f /etc/patroni/patroni.yml && echo yes)|$(stat -L -c %U /dev/watchdog-patroni 2>/dev/null)|$(rpm -q --quiet patroni-etcd && echo yes)"')
   IFS='|' read -r pg pat cfg wd pkg <<<"$st"
   echo "   $h: postgresql-17=$pg · patroni=$pat · 설정=${cfg:-없음} · watchdog 소유자=${wd:-없음} · patroni-etcd=${pkg:-없음}"
   [ "$pg" = active ]    || die "$h 의 postgresql-17 이 active 가 아님"

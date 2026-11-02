@@ -53,7 +53,7 @@ for h in db-01 db-02; do J=$(on "$h" "$PCTL list -f json" 2>/dev/null) && break;
 LEADER=$(echo "$J" | jq -r '.[] | select(.Role == "Leader" and .State == "running") | .Member')
 REPLICA=$(echo "$J" | jq -r '.[] | select(.Role == "Replica" and .State == "streaming") | .Member')
 [ -n "$LEADER" ] && [ -n "$REPLICA" ] || { on db-01 "$PCTL list" 2>/dev/null; die "Leader running + Replica streaming 이 아님 — 정상 상태에서만 시험"; }
-WD=$(on "$LEADER" 'sudo find /proc/[0-9]*/fd -lname /dev/watchdog 2>/dev/null | wc -l')
+WD=$(on "$LEADER" 'sudo find /proc/[0-9]*/fd -lname "/dev/watchdog*" 2>/dev/null | wc -l')
 [ "$WD" -ge 1 ] || die "$LEADER 에서 watchdog 을 잡은 프로세스가 없음 — Patroni 설정 확인(watchdog: required)"
 
 echo "대상: Leader = $LEADER → 기대: $REPLICA 가 자동 승격"
